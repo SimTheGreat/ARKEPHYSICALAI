@@ -6,11 +6,14 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [activeTab, setActiveTab] = useState('gantt')
+  const [productionStates, setProductionStates] = useState([])
+  const [loadingStates, setLoadingStates] = useState(false)
   const timelineRef = useRef(null)
   const timelineInstance = useRef(null)
 
   useEffect(() => {
     fetchSchedule()
+    fetchProductionStates()
   }, [])
 
   useEffect(() => {
@@ -129,7 +132,61 @@ function App() {
       setLoading(false)
     }
   }
+  const fetchProductionStates = async () => {
+    try {
+      setLoadingStates(true)
+      const response = await axios.get('http://localhost:8000/api/production-state')
+      console.log('Production states fetched:', response.data)
+      setProductionStates(response.data.states || [])
+    } catch (err) {
+      console.error('Failed to fetch production states:', err)
+    } finally {
+      setLoadingStates(false)
+    }
+  }
 
+  const loadOrderToLine = async (orderNumber) => {
+    try {
+      // Check if there's already an order on the line
+      const activeOrder = productionStates.length > 0 ? productionStates[0] : null
+      
+      if (activeOrder && activeOrder.production_order !== orderNumber) {
+        const confirmReplace = window.confirm(
+          `Warning: ${activeOrder.production_order} is currently on the line.\n\n` +
+          `Loading ${orderNumber} will remove ${activeOrder.production_order} from the line.\n\n` +
+          `Continue?`
+        )
+        if (!confirmReplace) {
+          return
+        }
+      }
+      
+      // Create production state entry (this will clear any existing order and set required steps)
+      console.log(`Creating production state for ${orderNumber}...`)
+      const createResponse = await axios.post(`http://localhost:8000/api/production-state/${orderNumber}`)
+      console.log('Create state response:', createResponse.data)
+      
+      // Refresh production states
+      await fetchProductionStates()
+      
+      console.log('Order loaded successfully:', orderNumber)
+    } catch (err) {
+      const errorMsg = err.response?.data?.detail || err.message
+      console.error('Failed to load order:', errorMsg, err)
+      alert(`Failed to load order: ${errorMsg}`)
+    }
+  }
+
+  const completeOperation = async (orderNumber, operation) => {
+    try {
+      await axios.post(`http://localhost:8000/api/production-state/${orderNumber}/operation/${operation}/complete`)
+      await fetchProductionStates()
+    } catch (err) {
+      const errorMsg = err.response?.data?.detail || err.message
+      console.error(`Failed to complete ${operation}:`, errorMsg)
+      alert(`Cannot finish ${operation.toUpperCase()}: ${errorMsg}`)
+    }
+  }
   const getPriorityColor = (priority) => {
     switch (priority) {
       case 1: return 'bg-red-100 text-red-800 border-red-300'
@@ -230,6 +287,16 @@ function App() {
               } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition`}
             >
               Production Schedule
+            </button>
+            <button
+              onClick={() => setActiveTab('line')}
+              className={`${
+                activeTab === 'line'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition`}
+            >
+              Production Line
             </button>
             <button
               onClick={() => setActiveTab('log')}
@@ -343,6 +410,249 @@ function App() {
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'line' && (
+          <div className="flex gap-6" style={{ minHeight: 'calc(100vh - 200px)' }}>
+            {/* ── Sidebar: Upcoming Orders ── */}
+            <div className="w-80 flex-shrink-0">
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden sticky top-6">
+                <div className="px-5 py-4 border-b border-gray-100 bg-gray-50">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold text-gray-800 uppercase tracking-wide">Upcoming Orders</h2>
+                    <span className="text-xs font-medium text-gray-500 bg-gray-200 rounded-full px-2 py-0.5">
+                      {schedule?.production_plans?.length || 0}
+                    </span>
+                  </div>
+                </div>
+                <div className="divide-y divide-gray-100 max-h-[calc(100vh-280px)] overflow-y-auto">
+                  {schedule?.production_plans?.map((plan, index) => {
+                    const state = productionStates.find(s => s.production_order === plan.order_number)
+                    const isLoaded = state && ['smt', 'reflow', 'tht', 'aoi', 'test', 'coating', 'pack'].some(op => state[op]?.required)
+                      && !['smt', 'reflow', 'tht', 'aoi', 'test', 'coating', 'pack'].every(op => !state[op]?.required || state[op]?.finished_at)
+                    const deadline = new Date(plan.deadline)
+                    const isLate = new Date(plan.ends_at) > deadline
+
+                    return (
+                      <div key={plan.order_number} className={`px-5 py-3 hover:bg-gray-50 transition cursor-default ${isLoaded ? 'bg-blue-50 border-l-4 border-l-blue-500' : ''}`}>
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-gray-400 font-mono">#{index + 1}</span>
+                            <span className="font-semibold text-sm text-gray-900">{plan.order_number}</span>
+                          </div>
+                          {isLoaded && (
+                            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" title="On Line"></span>
+                          )}
+                        </div>
+                        <div className="text-xs text-gray-500 mb-1.5">{plan.customer} · {plan.quantity}× {plan.product}</div>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`inline-block w-1.5 h-1.5 rounded-full ${plan.priority <= 2 ? 'bg-red-400' : 'bg-green-400'}`}></span>
+                            <span className="text-xs text-gray-400">P{plan.priority}</span>
+                            <span className={`text-xs ${isLate ? 'text-red-500 font-medium' : 'text-gray-400'}`}>
+                              · {deadline.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                            </span>
+                          </div>
+                          {!isLoaded && (
+                            <button
+                              onClick={() => loadOrderToLine(plan.order_number)}
+                              className="text-xs font-medium text-blue-600 hover:text-blue-800 transition"
+                            >
+                              Load →
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                  {(!schedule?.production_plans || schedule.production_plans.length === 0) && (
+                    <div className="px-5 py-8 text-center text-sm text-gray-400">No orders scheduled</div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* ── Main Area: Loaded Order ── */}
+            <div className="flex-1 min-w-0">
+              {(() => {
+                const loadedState = productionStates.find(s =>
+                  ['smt', 'reflow', 'tht', 'aoi', 'test', 'coating', 'pack'].some(op => s[op]?.required)
+                  && !['smt', 'reflow', 'tht', 'aoi', 'test', 'coating', 'pack'].every(op => !s[op]?.required || s[op]?.finished_at)
+                )
+                const loadedPlan = loadedState && schedule?.production_plans?.find(p => p.order_number === loadedState.production_order)
+
+                if (!loadedState) {
+                  return (
+                    <div className="h-full flex items-center justify-center">
+                      <div className="text-center py-20">
+                        <div className="mx-auto w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mb-4">
+                          <svg className="h-8 w-8 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
+                          </svg>
+                        </div>
+                        <h3 className="text-lg font-semibold text-gray-700 mb-1">No Order on Line</h3>
+                        <p className="text-sm text-gray-400">Select an order from the sidebar to load it onto the production line</p>
+                      </div>
+                    </div>
+                  )
+                }
+
+                const ops = [
+                  { key: 'smt', label: 'SMT', desc: 'Surface Mount Technology' },
+                  { key: 'reflow', label: 'Reflow', desc: 'Reflow Soldering' },
+                  { key: 'tht', label: 'THT', desc: 'Through-Hole Technology' },
+                  { key: 'aoi', label: 'AOI', desc: 'Automated Optical Inspection' },
+                  { key: 'test', label: 'Test', desc: 'Functional Testing' },
+                  { key: 'coating', label: 'Coating', desc: 'Conformal Coating' },
+                  { key: 'pack', label: 'Pack', desc: 'Final Packaging' },
+                ]
+                const completedOps = ops.filter(o => loadedState[o.key]?.required && loadedState[o.key]?.finished_at).length
+                const totalRequired = ops.filter(o => loadedState[o.key]?.required).length
+                const progressPct = totalRequired > 0 ? Math.round((completedOps / totalRequired) * 100) : 0
+
+                // Find the next operation to finish (first required & not finished)
+                const nextOp = ops.find(o => loadedState[o.key]?.required && !loadedState[o.key]?.finished_at)
+
+                return (
+                  <div className="space-y-6">
+                    {/* Order Header Card */}
+                    <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                      <div className="bg-gradient-to-r from-slate-800 to-slate-700 px-6 py-5 text-white">
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <div className="flex items-center gap-3 mb-1">
+                              <span className="text-xs font-medium uppercase tracking-wider text-slate-300">Active Order</span>
+                              <span className="inline-flex items-center gap-1 text-xs font-medium bg-green-500/20 text-green-300 rounded-full px-2 py-0.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span>
+                                Live
+                              </span>
+                            </div>
+                            <h2 className="text-2xl font-bold tracking-tight">{loadedState.production_order}</h2>
+                            {loadedPlan && (
+                              <p className="text-sm text-slate-300 mt-1">{loadedPlan.customer} · {loadedPlan.quantity}× {loadedPlan.product}</p>
+                            )}
+                          </div>
+                          <div className="text-right">
+                            <div className="text-3xl font-bold">{progressPct}%</div>
+                            <div className="text-xs text-slate-400">{completedOps} of {totalRequired} ops</div>
+                          </div>
+                        </div>
+                        {/* Progress bar */}
+                        <div className="mt-4 h-2 bg-white/10 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-green-400 to-emerald-400 rounded-full transition-all duration-500"
+                            style={{ width: `${progressPct}%` }}
+                          ></div>
+                        </div>
+                      </div>
+
+                      {/* Order details row */}
+                      {loadedPlan && (
+                        <div className="px-6 py-3 bg-gray-50 border-t border-gray-100 flex divide-x divide-gray-200 text-sm">
+                          <div className="pr-6">
+                            <span className="text-gray-400">Priority</span>
+                            <span className={`ml-2 font-semibold ${loadedPlan.priority <= 2 ? 'text-red-600' : 'text-gray-800'}`}>
+                              P{loadedPlan.priority} – {getPriorityLabel(loadedPlan.priority)}
+                            </span>
+                          </div>
+                          <div className="px-6">
+                            <span className="text-gray-400">Deadline</span>
+                            <span className="ml-2 font-semibold text-gray-800">
+                              {new Date(loadedPlan.deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                            </span>
+                          </div>
+                          <div className="px-6">
+                            <span className="text-gray-400">Scheduled</span>
+                            <span className="ml-2 font-semibold text-gray-800">
+                              {formatDate(loadedPlan.starts_at)} → {formatDate(loadedPlan.ends_at)}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Operations Pipeline */}
+                    <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                      <div className="px-6 py-4 border-b border-gray-100">
+                        <h3 className="text-sm font-semibold text-gray-800 uppercase tracking-wide">Operations Pipeline</h3>
+                      </div>
+                      <div className="p-6">
+                        <div className="space-y-3">
+                          {ops.map((op, idx) => {
+                            const opData = loadedState[op.key]
+                            const isRequired = opData?.required
+                            const isFinished = opData?.finished_at
+                            const isNext = nextOp?.key === op.key
+
+                            let statusColor, statusBg, statusIcon, statusLabel
+                            if (!isRequired) {
+                              statusColor = 'text-gray-300'
+                              statusBg = 'bg-gray-50'
+                              statusIcon = '—'
+                              statusLabel = 'Skipped'
+                            } else if (isFinished) {
+                              statusColor = 'text-green-600'
+                              statusBg = 'bg-green-50 border-green-200'
+                              statusIcon = '✓'
+                              statusLabel = new Date(isFinished).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+                            } else if (isNext) {
+                              statusColor = 'text-blue-600'
+                              statusBg = 'bg-blue-50 border-blue-300 ring-2 ring-blue-200'
+                              statusIcon = '▶'
+                              statusLabel = 'In Progress'
+                            } else {
+                              statusColor = 'text-gray-400'
+                              statusBg = 'bg-white border-gray-200'
+                              statusIcon = String(idx + 1)
+                              statusLabel = 'Waiting'
+                            }
+
+                            return (
+                              <div key={op.key} className={`flex items-center gap-4 px-4 py-3 rounded-lg border transition ${statusBg}`}>
+                                {/* Step indicator */}
+                                <div className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0 ${
+                                  isFinished ? 'bg-green-500 text-white' :
+                                  isNext ? 'bg-blue-500 text-white' :
+                                  !isRequired ? 'bg-gray-200 text-gray-400' :
+                                  'bg-gray-100 text-gray-400'
+                                }`}>
+                                  {statusIcon}
+                                </div>
+
+                                {/* Label */}
+                                <div className="flex-1 min-w-0">
+                                  <div className={`font-semibold text-sm ${!isRequired ? 'text-gray-300 line-through' : statusColor}`}>
+                                    {op.label}
+                                  </div>
+                                  <div className={`text-xs ${!isRequired ? 'text-gray-300' : 'text-gray-400'}`}>{op.desc}</div>
+                                </div>
+
+                                {/* Status / Action */}
+                                <div className="flex items-center gap-3 flex-shrink-0">
+                                  <span className={`text-xs font-medium ${statusColor}`}>{statusLabel}</span>
+                                  {isNext && (
+                                    <button
+                                      onClick={() => completeOperation(loadedState.production_order, op.key)}
+                                      className="inline-flex items-center gap-1.5 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold px-4 py-2 rounded-lg shadow-sm transition"
+                                    >
+                                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                                      </svg>
+                                      Finish
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })()}
             </div>
           </div>
         )}
