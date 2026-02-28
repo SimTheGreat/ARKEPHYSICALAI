@@ -1,8 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 import logging
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from request import ArkeAPI
 from scheduler import ProductionScheduler, SchedulingPolicy
@@ -30,11 +32,108 @@ app.add_middleware(
 arke_client = ArkeAPI()
 scheduler = ProductionScheduler(arke_client, policy=SchedulingPolicy.EDF)
 production_manager = ProductionOrderManager(arke_client, scheduler)
+STATIONS = ["SMT", "Reflow", "THT", "AOI", "Test", "Coating", "Pack"]
+DETECTION_STATES = set(STATIONS + ["NOT_PRESENT"])
+
+
+class PartState(BaseModel):
+    part_id: str
+    label: Optional[str] = None
+    current_station: str = "NOT_PRESENT"
+    current_station_since: Optional[str] = None
+    progress_index: int = -1
+    completed_stations: List[str] = Field(default_factory=list)
+    history: List[Dict[str, Any]] = Field(default_factory=list)
+    last_updated_at: str
+
+
+class TransitionEvent(BaseModel):
+    event_id: str
+    part_id: str
+    from_station: str
+    to_station: str
+    source: str = "manual"
+    confidence: Optional[float] = None
+    happened_at: str
+
+
+class CreatePartRequest(BaseModel):
+    part_id: Optional[str] = None
+    label: Optional[str] = None
+
+
+class DetectionUpdateRequest(BaseModel):
+    station: str
+    source: str = "vision"
+    confidence: Optional[float] = None
+
+
+parts_state: Dict[str, PartState] = {}
+transition_events: List[TransitionEvent] = []
 
 
 class ArkeRequest(BaseModel):
     endpoint: str
     method: Optional[str] = "GET"
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def ensure_part_exists(part_id: str) -> PartState:
+    part = parts_state.get(part_id)
+    if part is None:
+        raise HTTPException(status_code=404, detail=f"Part not found: {part_id}")
+    return part
+
+
+def update_part_station(
+    part: PartState,
+    to_station: str,
+    source: str,
+    confidence: Optional[float],
+) -> Optional[TransitionEvent]:
+    if to_station not in DETECTION_STATES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid station '{to_station}'. Allowed: {sorted(DETECTION_STATES)}",
+        )
+
+    from_station = part.current_station
+    if from_station == to_station:
+        part.last_updated_at = utc_now_iso()
+        return None
+
+    now_iso = utc_now_iso()
+
+    if part.history and "exited_at" not in part.history[-1]:
+        part.history[-1]["exited_at"] = now_iso
+
+    if to_station != "NOT_PRESENT":
+        part.history.append({"station": to_station, "entered_at": now_iso})
+
+    part.current_station = to_station
+    part.current_station_since = None if to_station == "NOT_PRESENT" else now_iso
+    part.last_updated_at = now_iso
+
+    if to_station in STATIONS:
+        station_idx = STATIONS.index(to_station)
+        if station_idx > part.progress_index:
+            part.progress_index = station_idx
+            part.completed_stations = STATIONS[: station_idx + 1]
+
+    event = TransitionEvent(
+        event_id=f"evt_{uuid4().hex[:12]}",
+        part_id=part.part_id,
+        from_station=from_station,
+        to_station=to_station,
+        source=source,
+        confidence=confidence,
+        happened_at=now_iso,
+    )
+    transition_events.append(event)
+    return event
 
 
 @app.get("/")
@@ -266,6 +365,70 @@ async def start_phase(phase_id: str):
     except Exception as e:
         logger.error(f"Error starting phase: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/line/parts")
+async def create_part(payload: CreatePartRequest):
+    part_id = payload.part_id or f"PART-{uuid4().hex[:6].upper()}"
+    if part_id in parts_state:
+        raise HTTPException(status_code=400, detail=f"Part already exists: {part_id}")
+
+    now_iso = utc_now_iso()
+    part = PartState(
+        part_id=part_id,
+        label=payload.label,
+        last_updated_at=now_iso,
+    )
+    parts_state[part_id] = part
+    return {"part": part}
+
+
+@app.post("/api/line/parts/{part_id}/detection")
+async def update_detection(part_id: str, payload: DetectionUpdateRequest):
+    part = ensure_part_exists(part_id)
+    event = update_part_station(
+        part=part,
+        to_station=payload.station,
+        source=payload.source,
+        confidence=payload.confidence,
+    )
+    return {"part": part, "event": event}
+
+
+@app.get("/api/line/state")
+async def get_line_state():
+    by_station: Dict[str, List[PartState]] = {station: [] for station in STATIONS}
+    not_present: List[PartState] = []
+    for part in parts_state.values():
+        if part.current_station in STATIONS:
+            by_station[part.current_station].append(part)
+        else:
+            not_present.append(part)
+
+    for station in STATIONS:
+        by_station[station].sort(key=lambda p: p.last_updated_at, reverse=True)
+    not_present.sort(key=lambda p: p.last_updated_at, reverse=True)
+
+    return {
+        "stations": STATIONS,
+        "parts": sorted(parts_state.values(), key=lambda p: p.last_updated_at, reverse=True),
+        "by_station": by_station,
+        "not_present": not_present,
+        "recent_events": transition_events[-30:],
+    }
+
+
+@app.get("/api/line/events")
+async def get_line_events(limit: int = 50):
+    safe_limit = min(max(limit, 1), 500)
+    return {"events": transition_events[-safe_limit:]}
+
+
+@app.post("/api/line/reset")
+async def reset_line_state():
+    parts_state.clear()
+    transition_events.clear()
+    return {"message": "Line state reset."}
 
 
 @app.post("/api/production/phase/{phase_id}/complete")

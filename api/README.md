@@ -40,6 +40,16 @@ docker run -p 8000:8000 arke-api
 - `GET /health` - Health check
 - `GET /api/arke/{endpoint}` - Proxy GET requests to Arke API
 - `POST /api/arke/refresh-token` - Manually refresh authentication token
+- `POST /api/line/parts` - Create/register a tracked part
+- `POST /api/line/parts/{part_id}/detection` - Update part station detection
+- `GET /api/line/state` - Snapshot of parts by station + recent events
+- `GET /api/line/events` - Transition event history
+- `POST /api/line/reset` - Reset line-state demo data
+
+## Core Backend Module
+
+`/api/line/*` is the shared backend core for line progression.
+All modular features (line vision tracker, QC detection, fault modules, operator tools) can publish station updates through this contract, and the frontend dashboard reads from one unified state.
 
 ## Documentation
 
@@ -117,3 +127,15 @@ Optional:
 ```bash
 python aruco_debug_live.py --camera-index 1 --aruco-ids 10,11,12,13 --aruco-dict DICT_5X5_100
 ```
+
+## Live Line Station Tracker UI
+
+Tracks a colored PCB proxy box and determines current station from saved polygons with temporal concentration scoring.
+
+```bash
+python line_tracker_ui.py --config ../demo_data/station_zones.json --source 0
+```
+
+If multiple polygons overlap due camera perspective, the tracker uses rolling station scores + debounce before switching station.
+If object is removed from view, station state is set to `NOT_PRESENT`.
+Use `Save Profile` / `Load Profile` in the UI to persist HSV and tracker thresholds.

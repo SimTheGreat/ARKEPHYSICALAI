@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "source": "0",
+  "hsv": {
+    "lower_h": 20,
+    "lower_s": 80,
+    "lower_v": 80,
+    "upper_h": 139,
+    "upper_s": 255,
+    "upper_v": 255
+  },
+  "tracker": {
+    "min_area": 800,
+    "score_decay": 0.92,
+    "switch_score": 0.55,
+    "debounce_frames": 5,
+    "trail_len": 40
+  },
+  "config_path": "../demo_data/station_zones.json"
+}

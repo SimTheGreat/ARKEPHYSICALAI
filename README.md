@@ -84,6 +84,9 @@ The web app runs on http://localhost:3000 and proxies API requests to http://loc
 - `GET /health` - Health check
 - `GET /api/arke/{endpoint}` - Proxy to Arke API
 - `POST /api/arke/refresh-token` - Refresh auth token
+- `GET /api/line/state` - Core line progression state for dashboard
+- `POST /api/line/parts` - Create a tracked part
+- `POST /api/line/parts/{part_id}/detection` - Push station updates from vision/manual tools
 
 ## Tech Stack
 
