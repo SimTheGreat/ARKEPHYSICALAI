@@ -1,13 +1,14 @@
 import requests
 import time
+import os
 
-BASE_URL = "https://hackathon20.arke.so/api"
-USERNAME = "arke"
-PASSWORD = "arke"
+BASE_URL = os.getenv("ARKE_BASE_URL", "https://hackathon20.arke.so/api")
+USERNAME = os.getenv("ARKE_USERNAME", "")
+PASSWORD = os.getenv("ARKE_PASSWORD", "arke")
 
 class ArkeAPI:
     def __init__(self):
-        self.token = "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI3MjFkZDc1My1kMmIzLTRkNjctODQ1NS1lNGUzZmE1YjZiNTIiLCJleHAiOjE3NzI0ODgwNTQsImlhdCI6MTc3MjIyODg1NCwiZnVsbF9uYW1lIjoiYXJrZSIsInVzZXJuYW1lIjoiYXJrZSIsInRlbmFudCI6eyJ0ZW5hbnRfaWQiOiJjMzFjZDI3Ny02NDRiLTQ1NzMtYWQ3Yi0yMzUzM2ZjODNjOTIiLCJ0ZW5hbnRfdXJsIjoiaGFja2F0aG9uMjAifSwic3VwZXJfYWRtaW4iOmZhbHNlLCJyb2xlcyI6WyJhZG1pbiJdfQ.loxWLefUyjCXjthEXxjhxt0K4KC9ULe1mXqQV75huTLJHJ5rtlSuk5HDjAZuQOVeWyKeKfkVBBxW7Ws1I4YyrBEDE7ftUO4bmnqGL_krgwIUJGb4JLB_XRzQd4H0ujC5dBQPaGWcxY_Ra07jiB9onS5oZ9OLjkF_ePq1GFH1-mZwFWV9791AK1GfUZ_qDmzGRempcxxDE4Un0wMQeF0C0xqF2VxTb5KjCffesagocbsgOhGaxT-QVytL1dR-cHa8UvNd7WKWpsOdkG2ynjlkzaVg0874FzwbNGA6PuP_eEgi8FP7Wowc65dzFyJERXcrgTG-dNZ26zDVsiHrH8BMkg"
+        self.token = os.getenv("ARKE_TOKEN", "")
         self.token_expiry = 0
 
     def login(self):
@@ -43,6 +44,22 @@ class ArkeAPI:
         headers = self.get_headers()
 
         response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
+    def post(self, endpoint, data=None):
+        url = f"{BASE_URL}{endpoint}"
+        headers = self.get_headers()
+
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        return response.json()
+
+    def put(self, endpoint, data=None):
+        url = f"{BASE_URL}{endpoint}"
+        headers = self.get_headers()
+
+        response = requests.put(url, headers=headers, json=data)
         response.raise_for_status()
         return response.json()
 

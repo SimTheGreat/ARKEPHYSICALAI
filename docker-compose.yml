@@ -8,6 +8,12 @@ services:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
+      - ARKE_BASE_URL=${ARKE_BASE_URL:-https://hackathon6.arke.so/api}
+      - ARKE_USERNAME=${ARKE_USERNAME:-arke}
+      - ARKE_PASSWORD=${ARKE_PASSWORD:-arke}
+      - ARKE_TOKEN=${ARKE_TOKEN}
+    env_file:
+      - .env
     restart: unless-stopped
 
   web:
