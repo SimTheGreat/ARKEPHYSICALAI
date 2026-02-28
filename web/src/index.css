@@ -1,68 +1,129 @@
-:root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
+.vis-item.order-item {
+  border-width: 2px;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 4px 8px;
 }
 
-body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
+.vis-item.priority-1 {
+  background-color: #fee2e2;
+  border-color: #dc2626;
+  color: #991b1b;
 }
 
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
+.vis-item.priority-2 {
+  background-color: #fed7aa;
+  border-color: #ea580c;
+  color: #9a3412;
 }
 
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
-  cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+.vis-item.priority-3 {
+  background-color: #d1fae5;
+  border-color: #059669;
+  color: #065f46;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
-  }
+.vis-item.priority-4 {
+  background-color: #d1fae5;
+  border-color: #10b981;
+  color: #047857;
+}
+
+.vis-item.priority-5 {
+  background-color: #f3f4f6;
+  border-color: #6b7280;
+  color: #4b5563;
+}
+
+.vis-item.late-order {
+  background: repeating-linear-gradient(
+    45deg,
+    #fee2e2,
+    #fee2e2 10px,
+    #fecaca 10px,
+    #fecaca 20px
+  );
+  border-color: #dc2626 !important;
+}
+
+.order-label {
+  line-height: 1.3;
+}
+
+.order-detail {
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.conflict-badge {
+  display: inline-block;
+  background-color: #fbbf24;
+  color: #78350f;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: bold;
+  margin-left: 4px;
+}
+
+.delta-due {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: bold;
+}
+
+.delta-due.late {
+  background-color: #dc2626;
+  color: white;
+}
+
+.delta-due.on-time {
+  background-color: #10b981;
+  color: white;
+}
+
+.vis-item.deadline-point {
+  background: transparent;
+  border: none;
+  font-size: 20px;
+}
+
+.deadline-marker {
+  font-size: 16px;
+  cursor: help;
+}
+
+.vis-item.day-boundary {
+  background-color: rgba(0, 0, 0, 0.05);
+  border-left: 1px dashed #9ca3af;
+  border-right: none;
+  z-index: -1;
+}
+
+.vis-time-axis .vis-grid.vis-vertical {
+  border-left: 1px solid #e5e7eb;
+}
+
+.vis-time-axis .vis-grid.vis-minor {
+  border-left-style: dotted;
+}
+
+.vis-current-time {
+  background-color: #dc2626;
+  width: 2px;
 }
