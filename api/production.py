@@ -1,7 +1,7 @@
 """
 Production order creation and phase scheduling module
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 import logging
 
@@ -20,38 +20,32 @@ class ProductionOrderManager:
         self.arke = arke_client
         self.scheduler = scheduler
     
-    def create_production_order(self, plan: ProductionPlan, product_data: Dict) -> Dict[str, Any]:
+    def create_production_order(self, plan: ProductionPlan) -> Dict[str, Any]:
         """
         Create a production order in Arke
         
         Args:
             plan: Production plan from scheduler
-            product_data: Product details from API
             
         Returns:
             Created production order data
         """
         try:
-            logger.info(f"Creating production order for {plan.sales_order_number}")
-            
-            # Prepare production order data
-            production_order = {
+            payload = {
                 "product_id": plan.product_id,
                 "quantity": plan.quantity,
                 "starts_at": plan.starts_at.isoformat(),
-                "ends_at": plan.ends_at.isoformat(),
-                # Add reference to sales order if supported
-                # "sales_order_id": plan.sales_order_id,
+                "ends_at": plan.ends_at.isoformat()
             }
             
-            # Create the production order
-            result = self.arke.put("/product/production", production_order)
+            logger.info(f"Creating production order for {plan.sales_order_number}: {payload}")
+            result = self.arke.put("/product/production", payload)
+            logger.info(f"Created production order: {result.get('id', 'unknown')}")
             
-            logger.info(f"Production order created: {result.get('id', 'unknown')}")
             return result
             
         except Exception as e:
-            logger.error(f"Failed to create production order: {str(e)}")
+            logger.error(f"Failed to create production order for {plan.sales_order_number}: {e}")
             raise
     
     def schedule_phases(self, production_order_id: str) -> Dict[str, Any]:
@@ -83,7 +77,14 @@ class ProductionOrderManager:
             
             # Step 3: Assign start/end dates to each phase
             # Phases are sequential - each starts when previous ends
-            current_start = datetime.fromisoformat(production_order["starts_at"].replace("Z", "+00:00"))
+            starts_at_str = production_order.get("starts_at", "")
+            if starts_at_str:
+                current_start = datetime.fromisoformat(starts_at_str.replace("Z", "+00:00"))
+                # Ensure timezone awareness
+                if current_start.tzinfo is None:
+                    current_start = current_start.replace(tzinfo=timezone.utc)
+            else:
+                current_start = self.scheduler.CURRENT_DATE
             
             for i, phase in enumerate(phases):
                 phase_id = phase["id"]
@@ -131,47 +132,23 @@ class ProductionOrderManager:
         Returns:
             List of created and scheduled production orders
         """
-        results = []
-        
-        # First, get all products to map IDs
-        products = self.arke.get("/product/product")
-        product_map = {p["name"]: p for p in products}
+        created_orders = []
         
         for plan in production_plans:
             try:
-                # Get product data
-                product_data = product_map.get(plan.product_name)
-                if not product_data:
-                    logger.warning(f"Product {plan.product_name} not found in API")
-                    continue
-                
                 # Create production order
-                production_order = self.create_production_order(plan, product_data)
+                production_order = self.create_production_order(plan)
                 production_order_id = production_order["id"]
                 
                 # Schedule phases
                 scheduled_order = self.schedule_phases(production_order_id)
-                
-                results.append({
-                    "plan": {
-                        "order_number": plan.sales_order_number,
-                        "customer": plan.customer,
-                        "product": plan.product_name,
-                        "quantity": plan.quantity,
-                    },
-                    "production_order": scheduled_order
-                })
+                created_orders.append(scheduled_order)
                 
             except Exception as e:
-                logger.error(f"Failed to process plan {plan.sales_order_number}: {str(e)}")
-                results.append({
-                    "plan": {
-                        "order_number": plan.sales_order_number,
-                        "error": str(e)
-                    }
-                })
+                logger.error(f"Failed to create/schedule production order for {plan.sales_order_number}: {e}")
+                continue
         
-        return results
+        return created_orders
     
     def confirm_production_order(self, production_order_id: str) -> Dict[str, Any]:
         """

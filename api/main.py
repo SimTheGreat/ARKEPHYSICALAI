@@ -28,7 +28,7 @@ app.add_middleware(
 )
 # Initialize Arke API client, scheduler, and production manager
 arke_client = ArkeAPI()
-scheduler = ProductionScheduler(policy=SchedulingPolicy.EDF)
+scheduler = ProductionScheduler(arke_client, policy=SchedulingPolicy.EDF)
 production_manager = ProductionOrderManager(arke_client, scheduler)
 
 
@@ -119,7 +119,7 @@ async def get_sales_orders():
                     "quantity": o.quantity,
                     "deadline": o.deadline.strftime("%Y-%m-%d"),
                     "priority": o.priority,
-                    "production_days": scheduler.calculate_production_time(o.product_name, o.quantity)
+                    "production_days": scheduler.calculate_production_time(o.product_name, o.quantity)[0]
                 }
                 for o in sales_orders
             ]

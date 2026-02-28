@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
@@ -46,6 +46,7 @@ class ProductionPlan:
     priority: int
     customer: str
     reasoning: str
+    total_minutes: float = 0.0
 
 
 class ProductionScheduler:
@@ -55,37 +56,101 @@ class ProductionScheduler:
     
     # Factory constraints
     WORKING_MINUTES_PER_DAY = 480  # 8 hours
-    CURRENT_DATE = datetime(2026, 2, 28, 8, 0, 0)  # Feb 28, 2026 08:00 AM
+    CURRENT_DATE = datetime(2026, 2, 28, 8, 0, 0, tzinfo=timezone.utc)  # Feb 28, 2026 08:00 AM UTC
     
-    # Product BOM data (minutes per unit)
-    PRODUCT_BOM = {
-        "PCB-IND-100": 147,  # SMT(30)+Reflow(15)+THT(45)+AOI(12)+Test(30)+Coating(9)+Pack(6)
-        "MED-300": 279,      # SMT(45)+Reflow(30)+THT(60)+AOI(30)+Test(90)+Coating(15)+Pack(9)
-        "IOT-200": 63,       # SMT(18)+Reflow(12)+AOI(9)+Test(18)+Pack(6)
-        "AGR-400": 144,      # SMT(30)+Reflow(15)+THT(30)+AOI(12)+Test(45)+Coating(12)
-        "PCB-PWR-500": 75,   # SMT(24)+Reflow(12)+AOI(9)+Test(24)+Pack(6)
-    }
-    
-    def __init__(self, policy: SchedulingPolicy = SchedulingPolicy.EDF):
+    def __init__(self, arke_client, policy: SchedulingPolicy = SchedulingPolicy.EDF):
         self.policy = policy
+        self.arke = arke_client
+        self.product_bom_cache = {}
+    
+    def load_product_bom_data(self) -> Dict[str, float]:
+        """Fetch product BOM data from Arke API"""
+        try:
+            products = self.arke.get("/product/product")
+            bom_data = {}
+            
+            for product in products:
+                product_name = product.get("name", "")
+                plan = product.get("plan", {})
+                
+                # Handle different plan structures
+                total_minutes = 0
+                if isinstance(plan, dict):
+                    phases = plan.get("phases", [])
+                    if isinstance(phases, list):
+                        for phase in phases:
+                            if isinstance(phase, dict):
+                                total_minutes += phase.get("duration_per_unit", 0)
+                    # Also try direct duration field
+                    elif plan.get("total_duration"):
+                        total_minutes = plan["total_duration"]
+                
+                if total_minutes == 0:
+                    logger.warning(f"No BOM data found for {product_name}, using 0 min/unit")
+                else:
+                    logger.info(f"Loaded BOM for {product_name}: {total_minutes} min/unit")
+                
+                bom_data[product_name] = total_minutes
+            
+            self.product_bom_cache = bom_data
+            return bom_data
+            
+        except Exception as e:
+            logger.error(f"Failed to load product BOM data: {e}")
+            raise
         
     def parse_sales_orders(self, orders_data: List[Dict[str, Any]]) -> List[SalesOrder]:
         """Parse raw API data into SalesOrder objects"""
         sales_orders = []
         
         for order in orders_data:
-            # Parse the order - handle various possible field names
-            sales_orders.append(SalesOrder(
-                id=order.get("id", ""),
-                order_number=order.get("order_number", order.get("number", "")),
-                customer=order.get("customer", {}).get("name", "Unknown") if isinstance(order.get("customer"), dict) else order.get("customer", "Unknown"),
-                product_id=order.get("product_id", ""),
-                product_name=order.get("product", {}).get("name", "") if isinstance(order.get("product"), dict) else "",
-                quantity=order.get("quantity", 0),
-                deadline=self._parse_datetime(order.get("expected_shipping_time", order.get("deadline", ""))),
-                priority=order.get("priority", 3),
-                status=order.get("status", "")
-            ))
+            try:
+                # Extract customer name from customer_attr
+                customer = "Unknown"
+                if isinstance(order.get("customer_attr"), dict):
+                    customer = order["customer_attr"].get("name", "Unknown")
+                elif isinstance(order.get("customer"), dict):
+                    customer = order["customer"].get("name", "Unknown")
+                elif isinstance(order.get("customer"), str):
+                    customer = order["customer"]
+                
+                logger.info(f"Extracted customer: {customer}")
+                
+                # Extract product info
+                product_name = ""
+                product_id = order.get("product_id", "")
+                
+                if isinstance(order.get("product"), dict):
+                    product_name = order["product"].get("name", "")
+                    if not product_id:
+                        product_id = order["product"].get("id", "")
+                elif isinstance(order.get("product_attr"), dict):
+                    product_name = order["product_attr"].get("name", "")
+                    if not product_id:
+                        product_id = order["product_attr"].get("id", "")
+                
+                # Extract order number - try internal_id first, then order_number
+                order_number = order.get("internal_id") or order.get("order_number") or order.get("number", "")
+                
+                # Parse deadline
+                deadline_str = order.get("expected_shipping_time") or order.get("deadline", "")
+                deadline = self._parse_datetime(deadline_str)
+                
+                sales_orders.append(SalesOrder(
+                    id=order.get("id", ""),
+                    order_number=order_number,
+                    customer=customer,
+                    product_id=product_id,
+                    product_name=product_name,
+                    quantity=order.get("quantity", 0),
+                    deadline=deadline,
+                    priority=order.get("priority", 3),
+                    status=order.get("status", "")
+                ))
+                
+            except Exception as e:
+                logger.error(f"Failed to parse sales order {order.get('id', 'unknown')}: {e}")
+                continue
         
         return sales_orders
     
@@ -97,24 +162,35 @@ class ProductionScheduler:
         try:
             # Handle ISO format
             if "T" in dt_string:
-                return datetime.fromisoformat(dt_string.replace("Z", "+00:00"))
-            # Handle date-only format
-            return datetime.strptime(dt_string, "%Y-%m-%d")
+                dt = datetime.fromisoformat(dt_string.replace("Z", "+00:00"))
+                # Ensure it has timezone info
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            # Handle date-only format - add time and timezone
+            dt = datetime.strptime(dt_string, "%Y-%m-%d")
+            return dt.replace(hour=8, minute=0, second=0, tzinfo=timezone.utc)
         except Exception as e:
             logger.warning(f"Failed to parse datetime {dt_string}: {e}")
             return self.CURRENT_DATE + timedelta(days=30)
     
-    def calculate_production_time(self, product_name: str, quantity: int) -> float:
-        """Calculate production time in working days"""
-        minutes_per_unit = self.PRODUCT_BOM.get(product_name, 100)
+    def calculate_production_time(self, product_name: str, quantity: int) -> tuple:
+        """
+        Calculate production time in working days and total minutes
+        Returns: (working_days, total_minutes)
+        """
+        if not self.product_bom_cache:
+            self.load_product_bom_data()
+        
+        minutes_per_unit = self.product_bom_cache.get(product_name, 100)
         total_minutes = minutes_per_unit * quantity
         working_days = total_minutes / self.WORKING_MINUTES_PER_DAY
-        return working_days
+        
+        return working_days, total_minutes
     
     def create_edf_schedule(self, sales_orders: List[SalesOrder]) -> List[ProductionPlan]:
         """
         Create production schedule using EDF (Earliest Deadline First)
-        Level 1 - Required: One production order per sales order, sorted by deadline
         """
         # Sort by deadline first, then priority (EDF prioritizes deadline over priority)
         sorted_orders = sorted(sales_orders, key=lambda x: x.urgency_score)
@@ -124,7 +200,10 @@ class ProductionScheduler:
         
         for order in sorted_orders:
             # Calculate production time needed
-            production_days = self.calculate_production_time(order.product_name, order.quantity)
+            production_days, total_minutes = self.calculate_production_time(
+                order.product_name, 
+                order.quantity
+            )
             ends_at = current_start + timedelta(days=production_days)
             
             # Check if we can meet the deadline
@@ -142,7 +221,8 @@ class ProductionScheduler:
                 ends_at=min(ends_at, order.deadline),  # Target the deadline
                 priority=order.priority,
                 customer=order.customer,
-                reasoning=reasoning
+                reasoning=reasoning,
+                total_minutes=total_minutes
             ))
             
             # Next order starts when this one ends
@@ -197,9 +277,9 @@ class ProductionScheduler:
         for i, plan in enumerate(production_plans, 1):
             summary += f"{i}. {plan.sales_order_number} - {plan.product_name}\n"
             summary += f"   Customer: {plan.customer}\n"
-            summary += f"   Quantity: {plan.quantity} units\n"
+            summary += f"   Quantity: {plan.quantity} units ({plan.total_minutes:.0f} min)\n"
             summary += f"   Priority: P{plan.priority}\n"
-            summary += f"   Schedule: {plan.starts_at.strftime('%b %d')} → {plan.ends_at.strftime('%b %d')}\n"
+            summary += f"   Schedule: {plan.starts_at.strftime('%b %d %H:%M')} → {plan.ends_at.strftime('%b %d %H:%M')}\n"
             summary += f"   Reasoning: {plan.reasoning}\n\n"
         
         if conflicts:
