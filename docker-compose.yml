@@ -6,16 +6,15 @@ services:
     container_name: arke-physical-ai-api
     ports:
       - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
     restart: unless-stopped
 
   web:
     build: ./web
     container_name: arke-physical-ai-web
     ports:
-      - "5173:5173"
+      - "3000:80"
     depends_on:
       - api
     restart: unless-stopped
-
-volumes:
-  ollama_data: {}
