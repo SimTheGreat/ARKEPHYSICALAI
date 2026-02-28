@@ -1,0 +1,21 @@
+version: "3.9"
+
+services:
+  api:
+    build: ./api
+    container_name: arke-physical-ai-api
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    container_name: arke-physical-ai-web
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  ollama_data: {}
