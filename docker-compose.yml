@@ -1,6 +1,24 @@
 version: "3.9"
 
 services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: arke-physical-ai-db
+    environment:
+      POSTGRES_DB: arke_production
+      POSTGRES_USER: arke
+      POSTGRES_PASSWORD: arke_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arke -d arke_production"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   api:
     build: ./api
     container_name: arke-physical-ai-api
@@ -12,8 +30,12 @@ services:
       - ARKE_USERNAME=${ARKE_USERNAME:-arke}
       - ARKE_PASSWORD=${ARKE_PASSWORD:-arke}
       - ARKE_TOKEN=${ARKE_TOKEN}
+      - DATABASE_URL=postgresql://arke:arke_dev_password@postgres:5432/arke_production
     env_file:
       - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   web:
@@ -24,3 +46,6 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+
+volumes:
+  postgres_data:

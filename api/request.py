@@ -1,21 +1,35 @@
 import requests
 import time
 import os
+from pathlib import Path
+from dotenv import load_dotenv
 
-BASE_URL = os.getenv("ARKE_BASE_URL", "https://hackathon20.arke.so/api")
-USERNAME = os.getenv("ARKE_USERNAME", "")
-PASSWORD = os.getenv("ARKE_PASSWORD", "arke")
+# Load env from common local locations.
+API_DIR = Path(__file__).resolve().parent
+REPO_ROOT = API_DIR.parent
+load_dotenv(REPO_ROOT / ".env", override=False)
+load_dotenv(API_DIR / ".env", override=False)
+
+DEFAULT_BASE_URL = "https://hackathon20.arke.so/api"
 
 class ArkeAPI:
     def __init__(self):
+        self.base_url = os.getenv("ARKE_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+        self.username = os.getenv("ARKE_USERNAME", "")
+        self.password = os.getenv("ARKE_PASSWORD", "")
         self.token = os.getenv("ARKE_TOKEN", "")
         self.token_expiry = 0
 
     def login(self):
-        url = f"{BASE_URL}/login"
+        if not self.username or not self.password:
+            raise ValueError(
+                "Missing Arke credentials. Set ARKE_USERNAME and ARKE_PASSWORD in .env."
+            )
+
+        url = f"{self.base_url}/login"
         payload = {
-            "username": USERNAME,
-            "password": PASSWORD
+            "username": self.username,
+            "password": self.password
         }
 
         response = requests.post(url, json=payload)
@@ -40,7 +54,7 @@ class ArkeAPI:
         }
 
     def get(self, endpoint):
-        url = f"{BASE_URL}{endpoint}"
+        url = f"{self.base_url}{endpoint}"
         headers = self.get_headers()
 
         response = requests.get(url, headers=headers)
@@ -48,7 +62,7 @@ class ArkeAPI:
         return response.json()
 
     def post(self, endpoint, data=None):
-        url = f"{BASE_URL}{endpoint}"
+        url = f"{self.base_url}{endpoint}"
         headers = self.get_headers()
 
         response = requests.post(url, headers=headers, json=data)
@@ -56,7 +70,7 @@ class ArkeAPI:
         return response.json()
 
     def put(self, endpoint, data=None):
-        url = f"{BASE_URL}{endpoint}"
+        url = f"{self.base_url}{endpoint}"
         headers = self.get_headers()
 
         response = requests.put(url, headers=headers, json=data)
