@@ -43,6 +43,7 @@ class ProductionPlan:
     quantity: int
     starts_at: datetime
     ends_at: datetime
+    deadline: datetime
     priority: int
     customer: str
     reasoning: str
@@ -115,7 +116,9 @@ class ProductionScheduler:
                 deadline_str = order.get("expected_shipping_time", "")
                 deadline = self._parse_datetime(deadline_str)
                 
-                priority = order.get("priority", 3)
+                # Map Arke API priority (5=highest) to standard priority (1=highest)
+                api_priority = order.get("priority", 3)
+                priority = 6 - api_priority  # 5→1, 4→2, 3→3, 2→4, 1→5
                 status = order.get("status", "")
                 
                 products = order.get("products", [])
@@ -214,6 +217,7 @@ class ProductionScheduler:
                 quantity=order.quantity,
                 starts_at=current_start,
                 ends_at=min(ends_at, order.deadline),  # Target the deadline
+                deadline=order.deadline,
                 priority=order.priority,
                 customer=order.customer,
                 reasoning=reasoning,
@@ -234,31 +238,32 @@ class ProductionScheduler:
         """
         conflicts = []
         
-        # Sort by priority
-        priority_sorted = sorted(sales_orders, key=lambda x: x.priority)
-        # Sort by EDF
+        # Sort by priority, then deadline
+        priority_sorted = sorted(sales_orders, key=lambda x: (x.priority, x.deadline))
+        # Sort by EDF (deadline, then priority)
         edf_sorted = sorted(sales_orders, key=lambda x: x.urgency_score)
         
-        # Find cases where priority-first differs from EDF
-        for i in range(len(sales_orders)):
-            if priority_sorted[i].id != edf_sorted[i].id:
-                # Found a difference
-                priority_order = priority_sorted[i]
-                edf_order = edf_sorted[i]
-                
+        # Find adjacent pairs where a lower-priority order comes before a higher-priority order in EDF
+        for i in range(len(edf_sorted) - 1):
+            current_order = edf_sorted[i]
+            next_order = edf_sorted[i + 1]
+            
+            # Check if next order has higher priority (lower number = higher priority)
+            # but comes after in EDF schedule because current has earlier deadline
+            if next_order.priority < current_order.priority:
                 conflicts.append({
                     "type": "priority_vs_deadline",
                     "priority_first": {
-                        "order": priority_order.order_number,
-                        "priority": priority_order.priority,
-                        "deadline": priority_order.deadline.strftime("%b %d"),
+                        "order": next_order.order_number,
+                        "priority": next_order.priority,
+                        "deadline": next_order.deadline.strftime("%b %d"),
                     },
                     "edf_first": {
-                        "order": edf_order.order_number,
-                        "priority": edf_order.priority,
-                        "deadline": edf_order.deadline.strftime("%b %d"),
+                        "order": current_order.order_number,
+                        "priority": current_order.priority,
+                        "deadline": current_order.deadline.strftime("%b %d"),
                     },
-                    "resolution": f"EDF schedules {edf_order.order_number} (deadline {edf_order.deadline.strftime('%b %d')}) before {priority_order.order_number} (deadline {priority_order.deadline.strftime('%b %d')}) to meet tighter deadline, despite lower priority.",
+                    "resolution": f"EDF schedules {current_order.order_number} (deadline {current_order.deadline.strftime('%b %d')}, P{current_order.priority}) before {next_order.order_number} (deadline {next_order.deadline.strftime('%b %d')}, P{next_order.priority}) to meet tighter deadline, despite lower priority.",
                 })
         
         return conflicts

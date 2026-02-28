@@ -163,6 +163,7 @@ async def get_production_schedule():
                     "priority": p.priority,
                     "starts_at": p.starts_at.isoformat(),
                     "ends_at": p.ends_at.isoformat(),
+                    "deadline": p.deadline.isoformat(),
                     "reasoning": p.reasoning
                 }
                 for p in production_plans
