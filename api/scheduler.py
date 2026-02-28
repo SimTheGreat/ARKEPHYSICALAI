@@ -105,51 +105,46 @@ class ProductionScheduler:
         
         for order in orders_data:
             try:
-                # Extract customer name from customer_attr
                 customer = "Unknown"
                 if isinstance(order.get("customer_attr"), dict):
                     customer = order["customer_attr"].get("name", "Unknown")
-                elif isinstance(order.get("customer"), dict):
-                    customer = order["customer"].get("name", "Unknown")
-                elif isinstance(order.get("customer"), str):
-                    customer = order["customer"]
                 
-                logger.info(f"Extracted customer: {customer}")
+                order_number = order.get("internal_id", "")
+                order_id = order.get("id", "")
                 
-                # Extract product info
-                product_name = ""
-                product_id = order.get("product_id", "")
-                
-                if isinstance(order.get("product"), dict):
-                    product_name = order["product"].get("name", "")
-                    if not product_id:
-                        product_id = order["product"].get("id", "")
-                elif isinstance(order.get("product_attr"), dict):
-                    product_name = order["product_attr"].get("name", "")
-                    if not product_id:
-                        product_id = order["product_attr"].get("id", "")
-                
-                # Extract order number - try internal_id first, then order_number
-                order_number = order.get("internal_id") or order.get("order_number") or order.get("number", "")
-                
-                # Parse deadline
-                deadline_str = order.get("expected_shipping_time") or order.get("deadline", "")
+                deadline_str = order.get("expected_shipping_time", "")
                 deadline = self._parse_datetime(deadline_str)
                 
-                sales_orders.append(SalesOrder(
-                    id=order.get("id", ""),
-                    order_number=order_number,
-                    customer=customer,
-                    product_id=product_id,
-                    product_name=product_name,
-                    quantity=order.get("quantity", 0),
-                    deadline=deadline,
-                    priority=order.get("priority", 3),
-                    status=order.get("status", "")
-                ))
+                priority = order.get("priority", 3)
+                status = order.get("status", "")
+                
+                products = order.get("products", [])
+                
+                if not products:
+                    logger.warning(f"No products found for order {order_number}")
+                    continue
+                
+                for product_item in products:
+                    product_name = product_item.get("name", "")
+                    quantity = product_item.get("quantity", 0)
+                    
+                    if not product_name or quantity == 0:
+                        continue
+                    
+                    sales_orders.append(SalesOrder(
+                        id=order_id,
+                        order_number=order_number,
+                        customer=customer,
+                        product_id=product_item.get("extra_id", ""),
+                        product_name=product_name,
+                        quantity=quantity,
+                        deadline=deadline,
+                        priority=priority,
+                        status=status
+                    ))
                 
             except Exception as e:
-                logger.error(f"Failed to parse sales order {order.get('id', 'unknown')}: {e}")
+                logger.error(f"Failed to parse order: {e}")
                 continue
         
         return sales_orders

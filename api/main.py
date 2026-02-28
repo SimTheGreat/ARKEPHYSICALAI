@@ -102,10 +102,9 @@ async def get_sales_orders():
         List of sales orders with scheduling info
     """
     try:
-        logger.info("Fetching accepted sales orders")
-        orders = arke_client.get("/sales/order?status=accepted")
+        logger.info("Fetching active sales orders")
+        orders = arke_client.get("/sales/order/_active")
         
-        # Parse and enrich with scheduling data
         sales_orders = scheduler.parse_sales_orders(orders)
         
         return {
@@ -140,8 +139,7 @@ async def get_production_schedule():
     try:
         logger.info("Generating production schedule")
         
-        # Fetch sales orders
-        orders = arke_client.get("/sales/order?status=accepted")
+        orders = arke_client.get("/sales/order/_active")
         sales_orders = scheduler.parse_sales_orders(orders)
         
         # Create EDF schedule
@@ -188,7 +186,7 @@ async def detect_scheduling_conflicts():
     try:
         logger.info("Detecting scheduling conflicts")
         
-        orders = arke_client.get("/sales/order?status=accepted")
+        orders = arke_client.get("/sales/order/_active")
         sales_orders = scheduler.parse_sales_orders(orders)
         conflicts = scheduler.detect_conflicts(sales_orders)
         
@@ -212,8 +210,7 @@ async def create_production_orders():
     try:
         logger.info("Creating production orders")
         
-        # Generate schedule
-        orders = arke_client.get("/sales/order?status=accepted")
+        orders = arke_client.get("/sales/order/_active")
         sales_orders = scheduler.parse_sales_orders(orders)
         production_plans = scheduler.create_edf_schedule(sales_orders)
         
