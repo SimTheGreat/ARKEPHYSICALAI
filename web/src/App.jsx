@@ -220,7 +220,7 @@ function App() {
     const options = {
       orientation: 'top',
       stack: false,
-      showCurrentTime: true,
+      showCurrentTime: false,
       margin: { item: 10, axis: 20 },
       editable: false,
       zoomMin: 1000 * 60 * 60 * 12,
@@ -249,6 +249,10 @@ function App() {
       groups,
       options
     )
+
+    // Add a custom "Now" line at the scenario date (Feb 28, 2026 08:00)
+    timelineInstance.current.addCustomTime(new Date('2026-02-28T08:00:00Z'), 'scenario-now')
+    timelineInstance.current.setCustomTimeMarker('Now', 'scenario-now')
   }
 
   const fetchSchedule = async (policy) => {
