@@ -470,17 +470,50 @@ function App() {
       <div className="w-full px-2 sm:px-3 lg:px-4 py-6">
         {activeTab === 'gantt' && (
           <div className="space-y-4">
-            <div className="bg-white rounded-lg shadow p-6">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Production Timeline - Single Line Sequential Processing</h2>
-              <div ref={timelineRef} className="w-full" style={{ height: '400px' }}></div>
+            {/* Header */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-slate-800 flex items-center justify-center">
+                  <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h7" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-base font-semibold text-gray-900">Production Gantt</h2>
+                  <p className="text-xs text-gray-400">Single-line sequential processing timeline</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-500 bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-[#fef2f2] border border-[#f87171]"></span>
+                  P1
+                </span>
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-500 bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-[#fff7ed] border border-[#fb923c]"></span>
+                  P2
+                </span>
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-500 bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-[#ecfdf5] border border-[#34d399]"></span>
+                  P3/P4
+                </span>
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-500 bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1">
+                  <span className="w-2.5 h-2.5 rounded-sm border border-red-300" style={{background:'repeating-linear-gradient(45deg,#fef2f2,#fef2f2 3px,#fecaca 3px,#fecaca 6px)'}}></span>
+                  Late
+                </span>
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-500 bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1">
+                  <span className="w-0.5 h-3 bg-red-500 rounded-full"></span>
+                  Now
+                </span>
+                {schedule?.production_plans?.length > 0 && (
+                  <span className="text-[11px] font-medium text-gray-400 bg-gray-50 rounded-md px-2.5 py-1">
+                    {schedule.production_plans.length} orders
+                  </span>
+                )}
+              </div>
             </div>
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <p className="text-sm text-blue-800">
-                <strong>Timeline View:</strong> Production orders run sequentially on a single production line. 
-                Day boundaries shown with vertical lines (480 min/day working time). 
-                Hatched red bars show orders running late. Delta shows days until/past deadline.
-                ⚠ indicates SO-003/SO-017 EDF vs Priority conflict.
-              </p>
+            {/* Timeline container */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+              <div ref={timelineRef} className="w-full gantt-container" style={{ height: '400px' }}></div>
             </div>
           </div>
         )}
