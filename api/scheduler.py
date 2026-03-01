@@ -403,8 +403,9 @@ class ProductionScheduler:
         """
         Detect scheduling conflicts between priority-first and EDF orderings.
 
-        Finds adjacent EDF pairs where a lower-priority order is placed
-        before a higher-priority one because its deadline is tighter.
+        Finds adjacent EDF pairs where a high-priority order (P1 or P2)
+        is placed after a lower-priority one because the latter has a
+        tighter deadline.  Trivial inversions (P3/P4/P5) are ignored.
         """
         conflicts = []
         edf_sorted = sorted(sales_orders, key=lambda x: x.urgency_score)
@@ -413,7 +414,7 @@ class ProductionScheduler:
             cur = edf_sorted[i]
             nxt = edf_sorted[i + 1]
             # lower number = higher priority; nxt has higher priority but comes later
-            if nxt.priority < cur.priority:
+            if nxt.priority < cur.priority and nxt.priority <= 2:
                 conflicts.append({
                     "type": "priority_vs_deadline",
                     "priority_first": {
