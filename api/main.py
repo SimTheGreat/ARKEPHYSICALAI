@@ -1331,8 +1331,12 @@ async def get_production_schedule(db: Session = Depends(get_db)):
         summary = scheduler.generate_schedule_summary(production_plans, conflicts)
         
         # Build plan dicts (shared by response + persistence)
-        plan_dicts = [
-            {
+        plan_dicts = []
+        for p in production_plans:
+            phase_blocks = scheduler.get_phase_blocks(
+                p.product_name, p.quantity, p.starts_at
+            )
+            plan_dicts.append({
                 "order_number": p.sales_order_number,
                 "customer": p.customer,
                 "product": p.product_name,
@@ -1342,9 +1346,8 @@ async def get_production_schedule(db: Session = Depends(get_db)):
                 "ends_at": p.ends_at.isoformat(),
                 "deadline": p.deadline.isoformat(),
                 "reasoning": p.reasoning,
-            }
-            for p in production_plans
-        ]
+                "phases": phase_blocks,
+            })
 
         # Persist schedule & diff against previous version
         new_version = save_schedule(db, plan_dicts, conflicts)

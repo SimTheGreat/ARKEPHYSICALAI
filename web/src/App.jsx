@@ -7,11 +7,15 @@ import ScheduleLogTab from './components/tabs/ScheduleLogTab'
 const OPERATION_SEQUENCE = ['smt', 'reflow', 'tht', 'aoi', 'test', 'coating', 'pack']
 const PHASE_TO_OPERATION = {
   SMT: 'smt',
+  REFLOW: 'reflow',
   Reflow: 'reflow',
   THT: 'tht',
   AOI: 'aoi',
+  TEST: 'test',
   Test: 'test',
+  COATING: 'coating',
   Coating: 'coating',
+  PACK: 'pack',
   Pack: 'pack',
 }
 
