@@ -3,5 +3,12 @@
   "source": "0",
   "width": 960,
   "height": 540,
-  "reference_image_path": "/Users/akshaykhanna/Local MacOS/Projects/ARKEPHYSICALAI/demo_data/pcb_images/pcb_ref_image.png"
+  "reference_image_path": "demo_data/pcb_images/pcb_ref_image.png",
+  "aruco_dict": "DICT_5X5_100",
+  "aruco_ids": "10,11,12,13",
+  "contrast_gain": 1.0,
+  "saturation_gain": 1.0,
+  "comparison_method": "absdiff",
+  "min_area": 3000,
+  "fail_ratio": 0.05
 }

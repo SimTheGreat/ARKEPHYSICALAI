@@ -11,6 +11,7 @@ import json
 import os
 import threading
 import time
+import requests
 
 from request import ArkeAPI
 from scheduler import ProductionScheduler, SchedulingPolicy
@@ -23,6 +24,8 @@ from database import (
     add_production_log, ProductionLog, ScheduleEntry,
     ArkePushRecord, get_push_status, get_push_record, upsert_push_record,
 )
+from database import init_db, get_db, ProductionState, create_production_state, get_production_state, finish_operation, get_all_production_states, get_active_order_on_line, clear_production_line, OPERATION_ORDER
+from qc_compare import detect_aruco_points, parse_ids, build_board_mask_from_markers
 
 try:
     import cv2  # type: ignore
@@ -71,6 +74,7 @@ DEFAULT_DEFECT_PROFILE_PATH = os.path.join(REPO_ROOT, "demo_data", "defect_camer
 DEFAULT_QC_REFERENCE_IMAGE = os.path.join(
     REPO_ROOT, "demo_data", "pcb_images", "pcb_ref_image.png"
 )
+DEFAULT_DEFECT_OUTPUT_DIR = os.path.join(REPO_ROOT, "demo_data", "pcb_images", "live_outputs")
 
 
 class PartState(BaseModel):
@@ -126,6 +130,11 @@ class VisionDefectSettingsUpdate(BaseModel):
     width: Optional[int] = None
     height: Optional[int] = None
     reference_image_path: Optional[str] = None
+    contrast_gain: Optional[float] = None
+    saturation_gain: Optional[float] = None
+    comparison_method: Optional[str] = None
+    min_area: Optional[int] = None
+    fail_ratio: Optional[float] = None
 
 
 class ZonePolygonUpdate(BaseModel):
@@ -567,10 +576,54 @@ class DefectVisionRuntime:
         self.source = "1"
         self.width = 960
         self.height = 540
-        self.reference_image_path = DEFAULT_QC_REFERENCE_IMAGE
+        self.reference_image_path = os.path.relpath(DEFAULT_QC_REFERENCE_IMAGE, REPO_ROOT)
+        self.aruco_dict = "DICT_5X5_100"
+        self.aruco_ids = [10, 11, 12, 13]  # top-left, top-right, bottom-right, bottom-left
+        self.lock_frames = 4
+        self.threshold = 45
+        self.min_area = 800
+        self.fail_ratio = 0.003
+        self.idle_reset_seconds = 2.5
+        self.contrast_gain = 1.35
+        self.saturation_gain = 1.25
+        self.comparison_method = "hybrid"  # absdiff | edge_diff | hybrid
         self.cap = None
         self.cap_source = None
+        self.last_frame_request_ts = 0.0
+        self._reset_runtime_state()
         self._load_profile()
+
+    def _reset_runtime_state(self):
+        self.lock_count = 0
+        self.locked = False
+        self.qc_confirmed = False
+        self.last_detected_ids: List[int] = []
+        self.last_qc_result: Optional[Dict[str, Any]] = None
+        self.locked_raw_frame: Optional[Any] = None
+        self.locked_aligned_frame: Optional[Any] = None
+        self.locked_annotated_frame: Optional[Any] = None
+        self.locked_alignment_ok = False
+        self.last_operator_notification: Optional[Dict[str, Any]] = None
+
+    def _normalize_reference_path(self, raw_path: str) -> str:
+        path = str(raw_path).strip()
+        if not path:
+            return os.path.relpath(DEFAULT_QC_REFERENCE_IMAGE, REPO_ROOT)
+        if os.path.isabs(path):
+            # If this absolute path points into repo, persist as repo-relative path.
+            try:
+                rel = os.path.relpath(path, REPO_ROOT)
+                if not rel.startswith(".."):
+                    path = rel
+            except Exception:
+                pass
+            return os.path.normpath(path if not os.path.isabs(path) else raw_path)
+        return os.path.normpath(path)
+
+    def _absolute_reference_path(self) -> str:
+        if os.path.isabs(self.reference_image_path):
+            return self.reference_image_path
+        return os.path.normpath(os.path.join(REPO_ROOT, self.reference_image_path))
 
     def _load_profile(self):
         if not os.path.exists(DEFAULT_DEFECT_PROFILE_PATH):
@@ -584,7 +637,26 @@ class DefectVisionRuntime:
         if data.get("height") is not None:
             self.height = int(data["height"])
         if data.get("reference_image_path"):
-            self.reference_image_path = str(data["reference_image_path"])
+            self.reference_image_path = self._normalize_reference_path(str(data["reference_image_path"]))
+        else:
+            self.reference_image_path = os.path.relpath(DEFAULT_QC_REFERENCE_IMAGE, REPO_ROOT)
+        if data.get("aruco_dict"):
+            self.aruco_dict = str(data["aruco_dict"])
+        if data.get("aruco_ids"):
+            try:
+                self.aruco_ids = parse_ids(str(data["aruco_ids"]))
+            except Exception:
+                pass
+        if data.get("contrast_gain") is not None:
+            self.contrast_gain = float(data["contrast_gain"])
+        if data.get("saturation_gain") is not None:
+            self.saturation_gain = float(data["saturation_gain"])
+        if data.get("comparison_method"):
+            self.comparison_method = str(data["comparison_method"])
+        if data.get("min_area") is not None:
+            self.min_area = int(data["min_area"])
+        if data.get("fail_ratio") is not None:
+            self.fail_ratio = float(data["fail_ratio"])
 
     def _save_profile(self):
         payload = {
@@ -592,7 +664,14 @@ class DefectVisionRuntime:
             "source": self.source,
             "width": self.width,
             "height": self.height,
-            "reference_image_path": self.reference_image_path,
+            "reference_image_path": self._normalize_reference_path(self.reference_image_path),
+            "aruco_dict": self.aruco_dict,
+            "aruco_ids": ",".join(str(x) for x in self.aruco_ids),
+            "contrast_gain": self.contrast_gain,
+            "saturation_gain": self.saturation_gain,
+            "comparison_method": self.comparison_method,
+            "min_area": self.min_area,
+            "fail_ratio": self.fail_ratio,
         }
         os.makedirs(os.path.dirname(DEFAULT_DEFECT_PROFILE_PATH), exist_ok=True)
         with open(DEFAULT_DEFECT_PROFILE_PATH, "w", encoding="utf-8") as f:
@@ -619,49 +698,355 @@ class DefectVisionRuntime:
         self.cap = cap
         self.cap_source = requested_source
 
+    def _load_reference(self):
+        path = self._absolute_reference_path()
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail=f"Reference image not found: {path}")
+        ref = cv2.imread(path, cv2.IMREAD_COLOR)
+        if ref is None:
+            raise HTTPException(status_code=500, detail=f"Could not read reference image: {path}")
+        return ref
+
+    def _align_to_reference(self, frame_bgr, ref_bgr):
+        ref_markers = detect_aruco_points(ref_bgr, self.aruco_dict, self.aruco_ids)
+        test_markers = detect_aruco_points(frame_bgr, self.aruco_dict, self.aruco_ids)
+        common_ids = [marker_id for marker_id in self.aruco_ids if marker_id in ref_markers and marker_id in test_markers]
+
+        if len(common_ids) < 1:
+            return cv2.resize(frame_bgr, (ref_bgr.shape[1], ref_bgr.shape[0])), False, ref_markers, test_markers
+
+        src_pts = np.concatenate([test_markers[marker_id] for marker_id in common_ids], axis=0)
+        dst_pts = np.concatenate([ref_markers[marker_id] for marker_id in common_ids], axis=0)
+        homography, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 4.0)
+        if homography is None:
+            return cv2.resize(frame_bgr, (ref_bgr.shape[1], ref_bgr.shape[0])), False, ref_markers, test_markers
+        aligned = cv2.warpPerspective(frame_bgr, homography, (ref_bgr.shape[1], ref_bgr.shape[0]))
+        return aligned, True, ref_markers, test_markers
+
+    def _evaluate_qc_on_aligned(self, aligned_bgr, aligned_ok: bool):
+        ref_bgr = self._load_reference()
+        ref_markers = detect_aruco_points(ref_bgr, self.aruco_dict, self.aruco_ids)
+
+        ref_gray = self._preprocess_for_diff(ref_bgr)
+        test_gray = self._preprocess_for_diff(aligned_bgr)
+        ref_blur = cv2.GaussianBlur(ref_gray, (3, 3), 0)
+        test_blur = cv2.GaussianBlur(test_gray, (3, 3), 0)
+
+        kernel = np.ones((3, 3), np.uint8)
+
+        diff = cv2.absdiff(ref_blur, test_blur)
+        _, abs_mask = cv2.threshold(diff, self.threshold, 255, cv2.THRESH_BINARY)
+        abs_mask = cv2.morphologyEx(abs_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        abs_mask = cv2.morphologyEx(abs_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        ref_edges = cv2.Canny(ref_blur, 45, 135)
+        test_edges = cv2.Canny(test_blur, 45, 135)
+        edge_mask = cv2.bitwise_xor(ref_edges, test_edges)
+        edge_mask = cv2.morphologyEx(edge_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        edge_mask = cv2.dilate(edge_mask, kernel, iterations=1)
+
+        method = self.comparison_method
+        if method == "edge_diff":
+            mask = edge_mask
+        elif method == "hybrid":
+            # Keep only intensity changes that are also backed by edge change.
+            mask = cv2.bitwise_and(abs_mask, edge_mask)
+            # Fall back to abs-only mask if hybrid becomes too sparse.
+            if np.count_nonzero(mask) < 100:
+                mask = abs_mask
+        else:
+            mask = abs_mask
+
+        board_mask = build_board_mask_from_markers(ref_bgr.shape, ref_markers, self.aruco_ids)
+        if np.count_nonzero(board_mask) > 0:
+            mask = cv2.bitwise_and(mask, board_mask)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        defect_regions = []
+        annotated = aligned_bgr.copy()
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < self.min_area:
+                continue
+            x, y, w, h = cv2.boundingRect(contour)
+            defect_regions.append({"x": x, "y": y, "w": w, "h": h, "area": float(area)})
+            cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 0, 255), 2)
+
+        changed_pixels = int(np.count_nonzero(mask))
+        total_pixels = int(mask.shape[0] * mask.shape[1])
+        changed_ratio = changed_pixels / total_pixels if total_pixels else 0.0
+        qc_status = "FAIL" if defect_regions or changed_ratio > self.fail_ratio else "PASS"
+
+        if np.count_nonzero(board_mask) > 0:
+            board_contours, _ = cv2.findContours(board_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(annotated, board_contours, -1, (0, 255, 255), 2)
+
+        status_color = (0, 200, 0) if qc_status == "PASS" else (0, 0, 255)
+        cv2.putText(annotated, f"QC: {qc_status}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, status_color, 2, cv2.LINE_AA)
+        cv2.putText(annotated, f"changed_ratio={changed_ratio:.5f}", (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA)
+        cv2.putText(
+            annotated,
+            f"aruco_aligned={aligned_ok} method={method} detected={self.last_detected_ids}",
+            (20, 110),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            annotated,
+            "ink_normalized=on (white background removed)",
+            (20, 145),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+        result = {
+            "status": qc_status,
+            "changed_ratio": changed_ratio,
+            "defect_count": len(defect_regions),
+            "defect_regions": defect_regions,
+            "aruco_aligned": aligned_ok,
+            "aruco_detected": self.last_detected_ids,
+            "contrast_gain": self.contrast_gain,
+            "saturation_gain": self.saturation_gain,
+            "comparison_method": method,
+            "timestamp": utc_now_iso(),
+        }
+        return annotated, result
+
+    def _preprocess_for_diff(self, image_bgr):
+        # Increase saturation/contrast, then keep only dark "ink" regions as black
+        # and force background to pure white to reduce lighting/shadow artifacts.
+        hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * self.saturation_gain, 0, 255)
+        boosted = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        contrasted = cv2.convertScaleAbs(boosted, alpha=self.contrast_gain, beta=0)
+        gray = cv2.cvtColor(contrasted, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Otsu on inverted grayscale marks dark strokes/components as foreground.
+        _, dark_mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        kernel = np.ones((3, 3), np.uint8)
+        dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        normalized = np.full_like(gray, 255)
+        normalized[dark_mask > 0] = 0
+        return normalized
+
+    def _save_qc_snapshot(self, raw_frame, annotated_frame, result):
+        os.makedirs(DEFAULT_DEFECT_OUTPUT_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        raw_path = os.path.join(DEFAULT_DEFECT_OUTPUT_DIR, f"defect_lock_raw_{stamp}.png")
+        annotated_path = os.path.join(DEFAULT_DEFECT_OUTPUT_DIR, f"defect_lock_result_{stamp}.png")
+        json_path = os.path.join(DEFAULT_DEFECT_OUTPUT_DIR, f"defect_lock_result_{stamp}.json")
+        cv2.imwrite(raw_path, raw_frame)
+        cv2.imwrite(annotated_path, annotated_frame)
+        payload = dict(result)
+        payload["raw_image"] = raw_path
+        payload["annotated_image"] = annotated_path
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
     def frame(self):
         with self._lock:
+            now = time.time()
+            if self.last_frame_request_ts and (now - self.last_frame_request_ts) > self.idle_reset_seconds:
+                # Re-arm detector when feed has been inactive (e.g. outside Test phase).
+                self._reset_runtime_state()
+            self.last_frame_request_ts = now
             self._open_capture_locked()
             ok, frame = self.cap.read()
             if not ok:
                 raise HTTPException(status_code=503, detail="Could not read frame from defect camera.")
             frame = cv2.resize(frame, (self.width, self.height))
-            cv2.putText(frame, "Defect Camera Live", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
-            ok_img, encoded = cv2.imencode(".jpg", frame)
+
+            if not self.locked:
+                detected = detect_aruco_points(frame, self.aruco_dict, self.aruco_ids)
+                found_ids = [marker_id for marker_id in self.aruco_ids if marker_id in detected]
+                self.last_detected_ids = sorted(found_ids)
+                if len(found_ids) == len(self.aruco_ids):
+                    self.lock_count += 1
+                else:
+                    self.lock_count = 0
+
+                preview = frame.copy()
+                if self.last_detected_ids:
+                    for marker_id in self.last_detected_ids:
+                        pts = detected[marker_id].astype(np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(preview, [pts], True, (0, 255, 255), 2)
+                        cx = int(np.mean(detected[marker_id][:, 0]))
+                        cy = int(np.mean(detected[marker_id][:, 1]))
+                        cv2.putText(preview, f"ID {marker_id}", (cx + 6, cy - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA)
+
+                status = "LOCKING" if self.lock_count > 0 else "SEARCHING"
+                cv2.putText(preview, f"Defect Camera: {status}", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(
+                    preview,
+                    f"found_ids={self.last_detected_ids} lock={self.lock_count}/{self.lock_frames}",
+                    (12, 58),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.62,
+                    (255, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                if self.lock_count >= self.lock_frames:
+                    ref_bgr = self._load_reference()
+                    aligned, aligned_ok, _, _ = self._align_to_reference(frame, ref_bgr)
+                    self.locked = True
+                    self.qc_confirmed = True
+                    self.locked_raw_frame = frame.copy()
+                    self.locked_aligned_frame = aligned.copy()
+                    self.locked_alignment_ok = bool(aligned_ok)
+                    annotated, result = self._evaluate_qc_on_aligned(self.locked_aligned_frame, self.locked_alignment_ok)
+                    self.last_qc_result = result
+                    self.locked_annotated_frame = annotated.copy()
+                    if self.locked_raw_frame is not None:
+                        self._save_qc_snapshot(self.locked_raw_frame, self.locked_annotated_frame, result)
+                    output_frame = self.locked_annotated_frame.copy()
+                    cv2.putText(
+                        output_frame,
+                        "QC FROZEN - Re-arm by obstruction/idle",
+                        (12, 142),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.58,
+                        (0, 255, 180),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                else:
+                    output_frame = preview
+            else:
+                output_frame = self.locked_annotated_frame.copy() if self.locked_annotated_frame is not None else frame.copy()
+                cv2.putText(
+                    output_frame,
+                    "QC FROZEN - Re-arm by obstruction/idle",
+                    (12, 142),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.58,
+                    (0, 255, 180),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+            ok_img, encoded = cv2.imencode(".jpg", output_frame)
             if not ok_img:
                 raise HTTPException(status_code=500, detail="Could not encode defect frame.")
             return encoded.tobytes()
 
     def status(self):
         with self._lock:
+            absolute_reference_path = self._absolute_reference_path()
             return {
                 "source": self.source,
                 "width": self.width,
                 "height": self.height,
-                "reference_image_path": self.reference_image_path,
-                "reference_exists": os.path.exists(self.reference_image_path),
+                "reference_image_path": self._normalize_reference_path(self.reference_image_path),
+                "reference_exists": os.path.exists(absolute_reference_path),
+                "aruco_detected_ids": self.last_detected_ids,
+                "aruco_lock_count": self.lock_count,
+                "aruco_lock_frames_required": self.lock_frames,
+                "snapshot_locked": self.locked,
+                "qc_confirmed": self.qc_confirmed,
+                "qc_result": self.last_qc_result,
+                "last_operator_notification": self.last_operator_notification,
+                "contrast_gain": self.contrast_gain,
+                "saturation_gain": self.saturation_gain,
+                "comparison_method": self.comparison_method,
+                "min_area": self.min_area,
+                "fail_ratio": self.fail_ratio,
             }
 
     def update_settings(self, payload: VisionDefectSettingsUpdate):
         with self._lock:
             incoming = payload.model_dump(exclude_none=True)
+            hard_reset = False
             if "source" in incoming:
                 self.source = str(incoming["source"])
+                hard_reset = True
                 if self.cap is not None:
                     self.cap.release()
                     self.cap = None
                     self.cap_source = None
             if "width" in incoming:
                 self.width = int(incoming["width"])
+                hard_reset = True
             if "height" in incoming:
                 self.height = int(incoming["height"])
+                hard_reset = True
             if "reference_image_path" in incoming:
-                path = incoming["reference_image_path"]
-                if not os.path.isabs(path):
-                    path = os.path.join(REPO_ROOT, path)
-                self.reference_image_path = path
+                self.reference_image_path = self._normalize_reference_path(incoming["reference_image_path"])
+                hard_reset = True
+            if "contrast_gain" in incoming:
+                self.contrast_gain = max(0.5, min(3.0, float(incoming["contrast_gain"])))
+            if "saturation_gain" in incoming:
+                self.saturation_gain = max(0.0, min(3.0, float(incoming["saturation_gain"])))
+            if "comparison_method" in incoming:
+                requested = str(incoming["comparison_method"]).strip().lower()
+                if requested not in {"absdiff", "edge_diff", "hybrid"}:
+                    raise HTTPException(status_code=400, detail="Invalid comparison_method. Use: absdiff, edge_diff, hybrid")
+                self.comparison_method = requested
+            if "min_area" in incoming:
+                self.min_area = max(50, min(20000, int(incoming["min_area"])))
+            if "fail_ratio" in incoming:
+                self.fail_ratio = max(0.0001, min(0.2, float(incoming["fail_ratio"])))
+            if hard_reset:
+                self._reset_runtime_state()
             self._save_profile()
             return self.status()
+
+    def notify_operator(self):
+        with self._lock:
+            if not self.last_qc_result or self.last_qc_result.get("status") != "FAIL":
+                raise HTTPException(status_code=400, detail="Notify Operator is only available for QC FAIL.")
+
+            notification = {
+                "sent_at": utc_now_iso(),
+                "status": "sent",
+                "channel": "LOCAL_LOG",
+                "message": (
+                    f"QC FAIL detected. defects={self.last_qc_result.get('defect_count', 0)} "
+                    f"changed_ratio={self.last_qc_result.get('changed_ratio', 0):.5f}"
+                ),
+            }
+
+            token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+            chat_id = os.getenv("TELEGRAM_OPERATOR_CHAT_ID", "").strip()
+            if token and chat_id:
+                try:
+                    text = (
+                        "QC FAIL detected.\n"
+                        f"defects={self.last_qc_result.get('defect_count', 0)}\n"
+                        f"changed_ratio={self.last_qc_result.get('changed_ratio', 0):.5f}"
+                    )
+                    response = requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={"chat_id": chat_id, "text": text},
+                        timeout=8,
+                    )
+                    response.raise_for_status()
+                    notification["channel"] = "TELEGRAM"
+                    notification["telegram_ok"] = True
+                except Exception as exc:
+                    notification["status"] = "failed"
+                    notification["channel"] = "TELEGRAM"
+                    notification["error"] = str(exc)
+
+            self.last_operator_notification = notification
+            if notification["status"] != "sent":
+                raise HTTPException(status_code=502, detail=f"Failed to notify operator: {notification.get('error', 'unknown error')}")
+            return {
+                "ok": True,
+                "notification": notification,
+                "qc_result": self.last_qc_result,
+            }
 
 
 line_vision_runtime = LineVisionRuntime()
@@ -1211,6 +1596,11 @@ async def update_defect_vision_settings(payload: VisionDefectSettingsUpdate):
     return defect_vision_runtime.update_settings(payload)
 
 
+@app.post("/api/vision/defect/notify-operator")
+async def notify_operator_for_defect_fail():
+    return defect_vision_runtime.notify_operator()
+
+
 @app.get("/api/vision/defect/frame")
 async def get_defect_vision_frame():
     image_bytes = defect_vision_runtime.frame()
@@ -1219,8 +1609,7 @@ async def get_defect_vision_frame():
 
 @app.get("/api/vision/defect/reference-image")
 async def get_defect_reference_image():
-    status = defect_vision_runtime.status()
-    path = status["reference_image_path"]
+    path = defect_vision_runtime._absolute_reference_path()
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail=f"Reference image not found: {path}")
     return FileResponse(path, media_type="image/png")

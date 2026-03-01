@@ -81,6 +81,12 @@
   margin-bottom: 10px;
 }
 
+.live-view-root .tile-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .live-view-root .tile h2 {
   margin: 0;
   font-size: 19px;
@@ -192,6 +198,64 @@
   background: #edf6ff;
   border: 1px solid #bdd9f3;
   color: #0f4f82;
+}
+
+.live-view-root .icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: #edf6ff;
+  border: 1px solid #bdd9f3;
+  color: #0f4f82;
+}
+
+.live-view-root .icon-btn svg {
+  display: block;
+}
+
+.live-view-root .confirm-icon-btn {
+  min-width: 38px;
+  width: auto;
+  padding: 0 10px;
+  font-size: 11px;
+  background: #e9f8ec;
+  border-color: #b8d8be;
+  color: #1f5a2a;
+}
+
+.live-view-root .qc-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  border: 1px solid #bed8ef;
+  background: #e8f4ff;
+  color: #145185;
+}
+
+.live-view-root .qc-pill.pass {
+  background: #e6f7ec;
+  border-color: #b7dfc4;
+  color: #1f6c41;
+}
+
+.live-view-root .qc-pill.fail {
+  background: #ffe8e8;
+  border-color: #f1b6b6;
+  color: #8e2f2f;
+}
+
+.live-view-root .qc-pill.neutral {
+  background: #eef3f8;
+  border-color: #cfdce6;
+  color: #4d6475;
 }
 
 .live-view-root label {
