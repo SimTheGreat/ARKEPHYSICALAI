@@ -26,6 +26,11 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 The API will be available at `http://localhost:8000`
 
+3. (Optional, for Telegram `REWORK` robot trigger) run robot listener:
+```bash
+uvicorn robot_server:app --reload --host 0.0.0.0 --port 8010
+```
+
 ### Docker
 
 Build and run with Docker:

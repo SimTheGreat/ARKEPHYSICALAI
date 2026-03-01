@@ -71,32 +71,37 @@ When you want the QC fail -> Telegram operator flow to work end-to-end, start se
    uvicorn main:app --reload --host 0.0.0.0 --port 8000
    ```
 
-2. Start web frontend:
+2. Start robot execution server (for `REWORK` -> `move2.py` trigger):
+   ```bash
+   cd api
+   uvicorn robot_server:app --reload --host 0.0.0.0 --port 8010
+   ```
+
+3. Start web frontend:
    ```bash
    cd web
    npm run dev
    ```
 
-3. Start public tunnel to backend:
+4. Start public tunnel to backend:
    ```bash
    cloudflared tunnel --url http://localhost:8000
    ```
    Copy the generated `https://...trycloudflare.com` URL.
 
-3.a 
+5.
    set -a
    source .env
    set +a
 
-
-4. Configure Telegram webhook (replace with your tunnel URL):
+6. Configure Telegram webhook (replace with your tunnel URL):
    ```bash
    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
      -d "url=$TELEGRAM_PUBLIC_URL/api/telegram/webhook" \
      -d "secret_token=$TELEGRAM_WEBHOOK_SECRET"
    ```
 
-5. Verify webhook health:
+7. Verify webhook health:
    ```bash
    curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
    ```
@@ -106,6 +111,17 @@ Required `.env` keys:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_OPERATOR_CHAT_ID`
 - `TELEGRAM_WEBHOOK_SECRET`
+- `ROBOT_SERVER_URL`
+- `ROBOT_SERVER_TOKEN`
+- `ROBOT_REWORK_SCRIPT`
+
+Quick robot-server check:
+```bash
+curl -s -X POST "http://127.0.0.1:8010/robot/execute" \
+  -H "Content-Type: application/json" \
+  -H "X-Robot-Token: $ROBOT_SERVER_TOKEN" \
+  -d '{"script":"move2.py","args":[],"context":{"source":"manual-test"}}'
+```
 
 Do you need to set webhook every restart?
 - If using `trycloudflare.com` quick tunnel: **Yes**, URL changes most runs.

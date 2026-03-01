@@ -179,6 +179,63 @@ def _telegram_api_call(method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
+def _trigger_robot_rework(decision_id: str, qc_result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Trigger robot-side server to execute the configured rework script.
+    This is best-effort and returns structured status for dashboard/ops visibility.
+    """
+    robot_url = os.getenv("ROBOT_SERVER_URL", "").strip()
+    robot_token = os.getenv("ROBOT_SERVER_TOKEN", "").strip()
+    robot_script = os.getenv("ROBOT_REWORK_SCRIPT", "move2.py").strip() or "move2.py"
+
+    if not robot_url:
+        return {
+            "status": "skipped",
+            "reason": "ROBOT_SERVER_URL not configured",
+            "script": robot_script,
+        }
+
+    endpoint = f"{robot_url.rstrip('/')}/robot/execute"
+    headers: Dict[str, str] = {}
+    if robot_token:
+        headers["X-Robot-Token"] = robot_token
+
+    payload = {
+        "script": robot_script,
+        "args": [],
+        "context": {
+            "source": "telegram_rework",
+            "decision_id": decision_id,
+            "qc_result": {
+                "status": qc_result.get("status"),
+                "defect_count": qc_result.get("defect_count"),
+                "changed_ratio": qc_result.get("changed_ratio"),
+                "timestamp": qc_result.get("timestamp"),
+            },
+        },
+    }
+
+    try:
+        response = requests.post(endpoint, json=payload, headers=headers, timeout=10)
+        response.raise_for_status()
+        body = response.json()
+        return {
+            "status": "triggered",
+            "endpoint": endpoint,
+            "script": robot_script,
+            "response": body,
+            "triggered_at": utc_now_iso(),
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "endpoint": endpoint,
+            "script": robot_script,
+            "error": str(exc),
+            "triggered_at": utc_now_iso(),
+        }
+
+
 def _parse_capture_source(raw: str):
     cleaned = str(raw).strip()
     return int(cleaned) if cleaned.isdigit() else cleaned
@@ -1757,6 +1814,11 @@ async def telegram_webhook(
             "user_id": str(callback_query.get("from", {}).get("id", "")),
             "chat_id": str(callback_query.get("message", {}).get("chat", {}).get("id", "")),
         }
+        if choice == "REWORK":
+            decision["robot_trigger"] = _trigger_robot_rework(
+                decision_id=decision_id,
+                qc_result=decision.get("qc_result") or {},
+            )
 
     # Best-effort acknowledgement back to Telegram.
     try:
@@ -1770,11 +1832,21 @@ async def telegram_webhook(
         )
         chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
         if chat_id:
+            followup_text = f"QC decision recorded: {choice} (id={decision_id})"
+            if choice == "REWORK":
+                trigger = decision.get("robot_trigger", {})
+                trigger_status = trigger.get("status", "unknown")
+                if trigger_status == "triggered":
+                    followup_text += "\nRobot rework command sent."
+                elif trigger_status == "skipped":
+                    followup_text += f"\nRobot command skipped: {trigger.get('reason', 'not configured')}."
+                else:
+                    followup_text += f"\nRobot command failed: {trigger.get('error', 'unknown error')}."
             _telegram_api_call(
                 "sendMessage",
                 {
                     "chat_id": chat_id,
-                    "text": f"QC decision recorded: {choice} (id={decision_id})",
+                    "text": followup_text,
                 },
             )
     except Exception:
