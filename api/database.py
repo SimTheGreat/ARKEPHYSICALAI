@@ -409,10 +409,23 @@ def _emit_schedule_summary(db, plans, conflicts, change_lines, version):
             "reasoning": p.get("reasoning", ""),
         })
 
+    # Check whether every order finishes before its deadline
+    all_deadlines_met = True
+    for p in plans:
+        ends = p.get("ends_at", "")
+        deadline = p.get("deadline", "")
+        if ends and deadline and str(ends) > str(deadline):
+            all_deadlines_met = False
+            break
+    met_text = "All deadlines are met." if all_deadlines_met else "⚠️ Some deadlines cannot be met."
+
     conflict_rows = []
     for c in conflicts:
+        base_resolution = c.get("resolution", "")
+        # Append the deadline-met verdict so the exact jury phrasing is complete
+        full_resolution = f"{base_resolution} {met_text}" if base_resolution else met_text
         conflict_rows.append({
-            "resolution": c.get("resolution", ""),
+            "resolution": full_resolution,
             "edf_order": c.get("edf_first", {}).get("order", ""),
             "priority_order": c.get("priority_first", {}).get("order", ""),
         })

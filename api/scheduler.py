@@ -308,44 +308,132 @@ class ProductionScheduler:
             current_start = ends_at
         
         return production_plans
-    
+
+    # ------------------------------------------------------------------
+    # Level 2 – Group by Product
+    # ------------------------------------------------------------------
+    def create_grouped_schedule(self, sales_orders: List[SalesOrder]) -> List[ProductionPlan]:
+        """
+        Schedule that groups orders for the *same product* together.
+
+        Within each product group:
+          - Use earliest deadline across all orders in the group.
+          - Sum the quantities.
+          - Use the highest Arke priority (max value).
+
+        Groups are then scheduled with EDF on the merged deadline.
+        This reduces setup/changeover overhead on the production line.
+        """
+        from collections import defaultdict
+
+        groups: Dict[str, List[SalesOrder]] = defaultdict(list)
+        for order in sales_orders:
+            groups[order.product_name].append(order)
+
+        merged: List[SalesOrder] = []
+        for product_name, orders in groups.items():
+            earliest = min(orders, key=lambda o: o.deadline)
+            merged.append(SalesOrder(
+                id=earliest.id,
+                order_number=", ".join(o.order_number for o in orders),
+                customer=", ".join(dict.fromkeys(o.customer for o in orders)),
+                product_id=earliest.product_id,
+                product_name=product_name,
+                quantity=sum(o.quantity for o in orders),
+                deadline=earliest.deadline,
+                priority=max(o.priority for o in orders),
+                status=earliest.status,
+            ))
+
+        return self.create_edf_schedule(merged)
+
+    # ------------------------------------------------------------------
+    # Level 2 – Split Batches
+    # ------------------------------------------------------------------
+    MAX_BATCH_SIZE = 10  # units
+
+    def create_split_schedule(self, sales_orders: List[SalesOrder]) -> List[ProductionPlan]:
+        """
+        Schedule that splits large orders into smaller batches.
+
+        If an order exceeds MAX_BATCH_SIZE, it is broken into multiple
+        sub-orders of at most MAX_BATCH_SIZE units.  Each sub-order
+        keeps the original deadline and priority so it is independently
+        scheduled by EDF.
+        """
+        split_orders: List[SalesOrder] = []
+        for order in sales_orders:
+            if order.quantity <= self.MAX_BATCH_SIZE:
+                split_orders.append(order)
+            else:
+                remaining = order.quantity
+                batch_num = 1
+                while remaining > 0:
+                    batch_qty = min(remaining, self.MAX_BATCH_SIZE)
+                    split_orders.append(SalesOrder(
+                        id=order.id,
+                        order_number=f"{order.order_number}-B{batch_num}",
+                        customer=order.customer,
+                        product_id=order.product_id,
+                        product_name=order.product_name,
+                        quantity=batch_qty,
+                        deadline=order.deadline,
+                        priority=order.priority,
+                        status=order.status,
+                    ))
+                    remaining -= batch_qty
+                    batch_num += 1
+
+        return self.create_edf_schedule(split_orders)
+
+    # ------------------------------------------------------------------
+    # Schedule dispatch – pick policy at call time
+    # ------------------------------------------------------------------
+    def create_schedule(self, sales_orders: List[SalesOrder],
+                        policy: Optional[SchedulingPolicy] = None) -> List[ProductionPlan]:
+        """Route to the right scheduler based on the active policy."""
+        pol = policy or self.policy
+        if pol == SchedulingPolicy.GROUP_BY_PRODUCT:
+            return self.create_grouped_schedule(sales_orders)
+        elif pol == SchedulingPolicy.SPLIT_BATCHES:
+            return self.create_split_schedule(sales_orders)
+        return self.create_edf_schedule(sales_orders)
+
     def detect_conflicts(self, sales_orders: List[SalesOrder]) -> List[Dict[str, Any]]:
         """
-        Detect scheduling conflicts - especially the SO-005 vs SO-003 case
-        SO-005: P1 priority, deadline Mar 8
-        SO-003: P2 priority, deadline Mar 4
-        EDF should schedule SO-003 first despite lower priority
+        Detect scheduling conflicts between priority-first and EDF orderings.
+
+        Finds adjacent EDF pairs where a lower-priority order is placed
+        before a higher-priority one because its deadline is tighter.
         """
         conflicts = []
-        
-        # Sort by priority, then deadline
-        priority_sorted = sorted(sales_orders, key=lambda x: (x.priority, x.deadline))
-        # Sort by EDF (deadline, then priority)
         edf_sorted = sorted(sales_orders, key=lambda x: x.urgency_score)
-        
-        # Find adjacent pairs where a lower-priority order comes before a higher-priority order in EDF
+
         for i in range(len(edf_sorted) - 1):
-            current_order = edf_sorted[i]
-            next_order = edf_sorted[i + 1]
-            
-            # Check if next order has higher priority (lower number = higher priority)
-            # but comes after in EDF schedule because current has earlier deadline
-            if next_order.priority < current_order.priority:
+            cur = edf_sorted[i]
+            nxt = edf_sorted[i + 1]
+            # lower number = higher priority; nxt has higher priority but comes later
+            if nxt.priority < cur.priority:
                 conflicts.append({
                     "type": "priority_vs_deadline",
                     "priority_first": {
-                        "order": next_order.order_number,
-                        "priority": next_order.priority,
-                        "deadline": next_order.deadline.strftime("%b %d"),
+                        "order": nxt.order_number,
+                        "priority": nxt.priority,
+                        "deadline": nxt.deadline.strftime("%b %-d"),
                     },
                     "edf_first": {
-                        "order": current_order.order_number,
-                        "priority": current_order.priority,
-                        "deadline": current_order.deadline.strftime("%b %d"),
+                        "order": cur.order_number,
+                        "priority": cur.priority,
+                        "deadline": cur.deadline.strftime("%b %-d"),
                     },
-                    "resolution": f"EDF schedules {current_order.order_number} (deadline {current_order.deadline.strftime('%b %d')}, P{current_order.priority}) before {next_order.order_number} (deadline {next_order.deadline.strftime('%b %d')}, P{next_order.priority}) to meet tighter deadline, despite lower priority.",
+                    "resolution": (
+                        f"{cur.order_number} (deadline {cur.deadline.strftime('%b %-d')}) "
+                        f"is scheduled before {nxt.order_number} (deadline {nxt.deadline.strftime('%b %-d')}) "
+                        f"despite {nxt.order_number} being P{nxt.priority} "
+                        f"— EDF prioritises tighter deadlines."
+                    ),
                 })
-        
+
         return conflicts
     
     def generate_schedule_summary(self, production_plans: List[ProductionPlan], conflicts: List[Dict]) -> str:

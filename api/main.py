@@ -1151,6 +1151,58 @@ line_vision_runtime = LineVisionRuntime()
 defect_vision_runtime = DefectVisionRuntime()
 
 
+# ---------------------------------------------------------------------------
+# Arke phase sync helper
+# ---------------------------------------------------------------------------
+def _sync_phase_to_arke(production_order_id: str, operation: str):
+    """
+    After a local operation is completed, advance the matching phase on Arke.
+
+    1. Fetch the production order from Arke.
+    2. Find the phase whose name matches the operation (case-insensitive).
+    3. If the phase is not yet started → ``_start`` it.
+    4. ``_complete`` the phase.
+    """
+    try:
+        po = arke_client.get(f"/product/production/{production_order_id}")
+    except Exception:
+        logger.debug(f"Could not fetch PO {production_order_id} from Arke")
+        return
+
+    phases = po.get("phases", [])
+    op_upper = operation.upper()
+
+    for phase in phases:
+        phase_name = (phase.get("phase", {}).get("name") or "").upper()
+        if phase_name != op_upper:
+            continue
+
+        phase_id = phase.get("id")
+        if not phase_id:
+            continue
+
+        status = (phase.get("status") or "").lower()
+
+        # Start if not already started
+        if status in ("", "draft", "scheduled", "pending"):
+            try:
+                production_manager.start_phase(phase_id)
+                logger.info(f"Arke phase {phase_name} ({phase_id}) started")
+            except Exception as e:
+                logger.warning(f"Could not start Arke phase {phase_name}: {e}")
+
+        # Complete
+        try:
+            production_manager.complete_phase(phase_id)
+            logger.info(f"Arke phase {phase_name} ({phase_id}) completed")
+        except Exception as e:
+            logger.warning(f"Could not complete Arke phase {phase_name}: {e}")
+
+        return  # matched phase found, done
+
+    logger.debug(f"No Arke phase matching '{operation}' found on PO {production_order_id}")
+
+
 class ArkeRequest(BaseModel):
     endpoint: str
     method: Optional[str] = "GET"
@@ -1307,22 +1359,36 @@ async def get_sales_orders():
 
 
 @app.get("/api/scheduler/schedule")
-async def get_production_schedule(db: Session = Depends(get_db)):
+async def get_production_schedule(
+    policy: str = "edf",
+    db: Session = Depends(get_db),
+):
     """
-    Generate production schedule using EDF policy.
-    Persists the schedule and logs any changes vs. the previous version.
-    
+    Generate production schedule.
+
+    Query params:
+        policy: 'edf' (default) | 'group_by_product' | 'split_batches'
+
     Returns:
         Production schedule with conflict detection
     """
     try:
-        logger.info("Generating production schedule")
+        from scheduler import SchedulingPolicy
+
+        POLICY_MAP = {
+            "edf": SchedulingPolicy.EDF,
+            "group_by_product": SchedulingPolicy.GROUP_BY_PRODUCT,
+            "split_batches": SchedulingPolicy.SPLIT_BATCHES,
+        }
+        selected_policy = POLICY_MAP.get(policy, SchedulingPolicy.EDF)
+
+        logger.info(f"Generating production schedule (policy={policy})")
         
         orders = arke_client.get("/sales/order/_active")
         sales_orders = scheduler.parse_sales_orders(orders)
         
-        # Create EDF schedule
-        production_plans = scheduler.create_edf_schedule(sales_orders)
+        # Create schedule using selected policy
+        production_plans = scheduler.create_schedule(sales_orders, selected_policy)
         
         # Detect conflicts
         conflicts = scheduler.detect_conflicts(sales_orders)
@@ -1353,7 +1419,7 @@ async def get_production_schedule(db: Session = Depends(get_db)):
         new_version = save_schedule(db, plan_dicts, conflicts)
         
         return {
-            "policy": "EDF (Earliest Deadline First)",
+            "policy": selected_policy.value,
             "generated_at": scheduler.CURRENT_DATE.isoformat(),
             "schedule_version": new_version,
             "production_plans": plan_dicts,
@@ -1492,6 +1558,13 @@ async def push_production_orders(db: Session = Depends(get_db)):
 
                 # Step 4b: Assign concrete dates to each phase
                 production_manager.assign_phase_dates(scheduled, plan)
+
+                # Step 5: Confirm the production order (draft → in_progress)
+                try:
+                    production_manager.confirm_production_order(arke_po_id)
+                    logger.info(f"Confirmed PO {arke_po_id}")
+                except Exception as confirm_err:
+                    logger.warning(f"Could not confirm PO {arke_po_id}: {confirm_err}")
 
                 # ── Record success ──
                 upsert_push_record(db, order_no, status="pushed",
@@ -1723,6 +1796,86 @@ async def get_operator_decisions(limit: int = 20):
     return {"count": len(ordered), "decisions": ordered[:safe_limit]}
 
 
+# ---------------------------------------------------------------------------
+# Schedule approval state
+# ---------------------------------------------------------------------------
+_schedule_approval: Dict[str, Any] = {}
+
+
+@app.post("/api/telegram/send-schedule")
+async def send_schedule_to_telegram(db: Session = Depends(get_db)):
+    """
+    Send the current schedule to the Telegram operator for approval.
+
+    Posts a formatted summary + inline APPROVE / REJECT buttons.
+    Stores the pending approval in ``_schedule_approval`` so the webhook
+    can match the callback.
+    """
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_OPERATOR_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        raise HTTPException(
+            status_code=400,
+            detail="TELEGRAM_BOT_TOKEN and TELEGRAM_OPERATOR_CHAT_ID must be set.",
+        )
+
+    # Build the current schedule
+    orders = arke_client.get("/sales/order/_active")
+    sales_orders = scheduler.parse_sales_orders(orders)
+    plans = scheduler.create_edf_schedule(sales_orders)
+    conflicts = scheduler.detect_conflicts(sales_orders)
+
+    # Format message
+    lines = ["📋 *PRODUCTION SCHEDULE — EDF*\n"]
+    for i, p in enumerate(plans, 1):
+        late = " ⚠️LATE" if p.ends_at > p.deadline else ""
+        lines.append(
+            f"{i}. `{p.sales_order_number}` {p.product_name} ×{p.quantity}"
+            f"  P{p.priority}  {p.starts_at.strftime('%b %-d')}–{p.ends_at.strftime('%b %-d')}{late}"
+        )
+    if conflicts:
+        lines.append(f"\n⚠️ {len(conflicts)} conflict(s):")
+        for c in conflicts:
+            lines.append(f"• {c['resolution']}")
+
+    text = "\n".join(lines)
+
+    approval_id = f"SCHED-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+
+    _schedule_approval[approval_id] = {
+        "id": approval_id,
+        "status": "PENDING",
+        "created_at": utc_now_iso(),
+        "plan_count": len(plans),
+    }
+
+    _telegram_api_call("sendMessage", {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "reply_markup": {
+            "inline_keyboard": [[
+                {"text": "✅ Approve", "callback_data": f"SCHED|{approval_id}|APPROVE"},
+                {"text": "❌ Reject", "callback_data": f"SCHED|{approval_id}|REJECT"},
+            ]]
+        },
+    })
+
+    add_production_log(
+        db, "info", "telegram",
+        f"Schedule sent to Telegram for approval ({approval_id})",
+        detail=f"{len(plans)} orders, {len(conflicts)} conflicts",
+    )
+
+    return {"ok": True, "approval_id": approval_id, "orders": len(plans)}
+
+
+@app.get("/api/telegram/schedule-approval")
+async def get_schedule_approval_status():
+    """Return current schedule approval state."""
+    return _schedule_approval
+
+
 @app.post("/api/telegram/webhook")
 async def telegram_webhook(
     payload: TelegramWebhookRequest,
@@ -1737,6 +1890,80 @@ async def telegram_webhook(
         return {"ok": True, "handled": False}
 
     callback_data = str(callback_query.get("data", ""))
+
+    # ── Schedule approval callbacks ──
+    if callback_data.startswith("SCHED|"):
+        parts = callback_data.split("|")
+        if len(parts) == 3:
+            _, approval_id, choice = parts
+            choice = choice.upper()
+            approval = _schedule_approval.get(approval_id)
+            if approval and approval["status"] == "PENDING":
+                approval["status"] = choice  # APPROVE or REJECT
+                approval["resolved_at"] = utc_now_iso()
+
+                # If approved → push + confirm all orders
+                if choice == "APPROVE":
+                    try:
+                        import asyncio
+                        # Call the push endpoint internally
+                        from database import get_db as _get_db_gen
+                        db_gen = _get_db_gen()
+                        db = next(db_gen)
+                        try:
+                            # Reuse the push logic
+                            orders_data = arke_client.get("/sales/order/_active")
+                            sales_orders = scheduler.parse_sales_orders(orders_data)
+                            production_plans = scheduler.create_edf_schedule(sales_orders)
+                            for plan in production_plans:
+                                order_no = plan.sales_order_number
+                                existing_rec = get_push_record(db, order_no)
+                                if existing_rec and existing_rec.status == "pushed":
+                                    continue
+                                upsert_push_record(db, order_no, status="pushing")
+                                try:
+                                    po = production_manager.create_production_order(plan)
+                                    arke_po_id = po.get("id", "")
+                                    scheduled = production_manager.schedule_phases(arke_po_id)
+                                    production_manager.assign_phase_dates(scheduled, plan)
+                                    try:
+                                        production_manager.confirm_production_order(arke_po_id)
+                                    except Exception:
+                                        pass
+                                    upsert_push_record(db, order_no, status="pushed",
+                                                       arke_id=arke_po_id, error=None)
+                                except Exception as push_err:
+                                    upsert_push_record(db, order_no, status="failed",
+                                                       error=str(push_err))
+                            add_production_log(db, "info", "telegram",
+                                               f"Schedule approved via Telegram ({approval_id})",
+                                               detail="Orders pushed and confirmed")
+                        finally:
+                            db.close()
+                    except Exception as e:
+                        logger.error(f"Auto-push after approval failed: {e}")
+
+                # Acknowledge
+                try:
+                    _telegram_api_call("answerCallbackQuery", {
+                        "callback_query_id": callback_query.get("id"),
+                        "text": f"Schedule {choice}D",
+                        "show_alert": False,
+                    })
+                    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+                    if chat_id:
+                        emoji = "✅" if choice == "APPROVE" else "❌"
+                        _telegram_api_call("sendMessage", {
+                            "chat_id": chat_id,
+                            "text": f"{emoji} Schedule {choice.lower()}d. "
+                                    + ("Orders pushed to Arke." if choice == "APPROVE" else ""),
+                        })
+                except Exception:
+                    pass
+
+            return {"ok": True, "handled": True, "approval": approval}
+
+    # ── QC decision callbacks ──
     if not callback_data.startswith("QC|"):
         return {"ok": True, "handled": False}
 
@@ -1888,9 +2115,17 @@ async def complete_operation(production_order_id: str, operation: str, db: Sessi
     """
     Finish an operation for the active order.
     Enforces sequential order and required-checks.
+    Also syncs with Arke: starts + completes the matching phase.
     """
     try:
         state = finish_operation(db, production_order_id, operation)
+
+        # ── Arke sync: advance the matching phase ──
+        try:
+            _sync_phase_to_arke(production_order_id, operation)
+        except Exception as sync_err:
+            logger.warning(f"Arke phase sync failed for {operation}: {sync_err}")
+
         return {"message": f"Operation {operation} completed for {production_order_id}"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
