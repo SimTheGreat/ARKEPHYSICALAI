@@ -27,6 +27,7 @@ function LiveViewDashboard() {
   const [frameTick, setFrameTick] = useState(Date.now());
   const [savingLive, setSavingLive] = useState(false);
   const [savingDefect, setSavingDefect] = useState(false);
+  const [notifyingOperator, setNotifyingOperator] = useState(false);
   const [savingZones, setSavingZones] = useState(false);
   const [calibrating, setCalibrating] = useState(false);
   const [showZoneModal, setShowZoneModal] = useState(false);
@@ -56,6 +57,13 @@ function LiveViewDashboard() {
     if (selectedZone === "ALL") return zones;
     return zones.filter((zone) => zone.station === selectedZone);
   }, [selectedZone, zones]);
+
+  useEffect(() => {
+    if (!defectEnabled) return;
+    fetchDefectStatus();
+    const defectInterval = setInterval(fetchDefectStatus, 800);
+    return () => clearInterval(defectInterval);
+  }, [defectEnabled]);
 
   async function fetchAll() {
     await Promise.all([fetchLiveSettings(), fetchLiveStatus(), fetchZones(), fetchDefectStatus()]);
@@ -146,6 +154,11 @@ function LiveViewDashboard() {
         width: Number(defectSettings.width),
         height: Number(defectSettings.height),
         reference_image_path: defectSettings.reference_image_path,
+        contrast_gain: Number(defectSettings.contrast_gain),
+        saturation_gain: Number(defectSettings.saturation_gain),
+        comparison_method: String(defectSettings.comparison_method || "hybrid"),
+        min_area: Number(defectSettings.min_area),
+        fail_ratio: Number(defectSettings.fail_ratio),
       });
       await fetchDefectStatus();
       setShowDefectSettingsModal(false);
@@ -153,6 +166,21 @@ function LiveViewDashboard() {
       setError(err?.response?.data?.detail || err?.message || "Failed to save defect settings");
     } finally {
       setSavingDefect(false);
+    }
+  }
+
+  async function notifyOperator() {
+    setNotifyingOperator(true);
+    try {
+      const response = await axios.post("/api/vision/defect/notify-operator");
+      const channel = response?.data?.notification?.channel || "LOCAL_LOG";
+      setInfo(`Operator notified via ${channel}.`);
+      await fetchDefectStatus();
+      setError("");
+    } catch (err) {
+      setError(err?.response?.data?.detail || err?.message || "Failed to notify operator");
+    } finally {
+      setNotifyingOperator(false);
     }
   }
 
@@ -270,6 +298,9 @@ function LiveViewDashboard() {
           onOpenDefectSettingsModal={() => setShowDefectSettingsModal(true)}
           defectEnabled={defectEnabled}
           currentPhase={currentPhase}
+          defectStatus={defectSettings}
+          onNotifyOperator={notifyOperator}
+          notifyingOperator={notifyingOperator}
         />
       </section>
 
