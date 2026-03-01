@@ -3,6 +3,7 @@ import axios from 'axios'
 import LiveViewDashboard from './live/LiveViewDashboard'
 import LiveViewInlineSection from './live/LiveViewInlineSection'
 import ScheduleLogTab from './components/tabs/ScheduleLogTab'
+import DashboardTab from './components/tabs/DashboardTab'
 
 const OPERATION_SEQUENCE = ['smt', 'reflow', 'tht', 'aoi', 'test', 'coating', 'pack']
 const PHASE_TO_OPERATION = {
@@ -43,13 +44,14 @@ function App() {
   const [schedule, setSchedule] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [activeTab, setActiveTab] = useState('gantt')
+  const [activeTab, setActiveTab] = useState('dashboard')
   const [productionStates, setProductionStates] = useState([])
   const [loadingStates, setLoadingStates] = useState(false)
   const [lineVisionPhase, setLineVisionPhase] = useState('NOT_PRESENT')
   const [productionLog, setProductionLog] = useState([])
   const [pushStatus, setPushStatus] = useState({})
   const [pushing, setPushing] = useState(false)
+  const [schedulingPolicy, setSchedulingPolicy] = useState('edf')
   const timelineRef = useRef(null)
   const timelineInstance = useRef(null)
   const autoAdvanceRef = useRef({
@@ -249,10 +251,11 @@ function App() {
     )
   }
 
-  const fetchSchedule = async () => {
+  const fetchSchedule = async (policy) => {
     try {
       setLoading(true)
-      const response = await axios.get('http://localhost:8000/api/scheduler/schedule')
+      const p = policy || schedulingPolicy
+      const response = await axios.get(`http://localhost:8000/api/scheduler/schedule?policy=${p}`)
       setSchedule(response.data)
       setError(null)
       // Refresh log after schedule recalculation (new version may have been created)
@@ -484,6 +487,16 @@ function App() {
         <div className="border-b border-gray-200">
           <nav className="-mb-px flex space-x-8">
             <button
+              onClick={() => setActiveTab('dashboard')}
+              className={`${
+                activeTab === 'dashboard'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition`}
+            >
+              Dashboard
+            </button>
+            <button
               onClick={() => setActiveTab('gantt')}
               className={`${
                 activeTab === 'gantt'
@@ -491,7 +504,7 @@ function App() {
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition`}
             >
-              Gantt Chart
+              Production Gantt
             </button>
             <button
               onClick={() => setActiveTab('schedule')}
@@ -501,7 +514,7 @@ function App() {
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition`}
             >
-              Production Schedule
+              Production List
             </button>
             <button
               onClick={() => setActiveTab('line')}
@@ -523,22 +536,20 @@ function App() {
             >
               Schedule Log
             </button>
-            <button
-              onClick={() => setActiveTab('live-view')}
-              className={`${
-                activeTab === 'live-view'
-                  ? 'border-blue-500 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-              } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition`}
-            >
-              Live View
-            </button>
           </nav>
         </div>
       </div>
 
       {/* Content */}
       <div className="w-full px-2 sm:px-3 lg:px-4 py-6">
+        {activeTab === 'dashboard' && (
+          <DashboardTab
+            schedule={schedule}
+            productionLog={productionLog}
+            pushStatus={pushStatus}
+          />
+        )}
+
         {activeTab === 'gantt' && (
           <div className="space-y-4">
             {/* Header */}
@@ -599,8 +610,19 @@ function App() {
                   <div className="text-2xl font-bold text-gray-900">{schedule?.production_plans?.length || 0}</div>
                 </div>
                 <div className="bg-white rounded-lg shadow p-4 border">
-                  <div className="text-sm text-gray-500">Policy</div>
-                  <div className="text-2xl font-bold text-blue-600">EDF</div>
+                  <div className="text-sm text-gray-500 mb-1">Policy</div>
+                  <select
+                    value={schedulingPolicy}
+                    onChange={e => {
+                      setSchedulingPolicy(e.target.value)
+                      fetchSchedule(e.target.value)
+                    }}
+                    className="text-sm font-bold text-blue-600 bg-transparent border border-blue-200 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                  >
+                    <option value="edf">EDF</option>
+                    <option value="group_by_product">Group by Product</option>
+                    <option value="split_batches">Split Batches</option>
+                  </select>
                 </div>
                 <div className="bg-white rounded-lg shadow p-4 border">
                   <div className="text-sm text-gray-500">Conflicts Detected</div>
@@ -641,6 +663,22 @@ function App() {
                     Push to Arke
                   </>
                 )}
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    await axios.post('http://localhost:8000/api/telegram/send-schedule')
+                    alert('Schedule sent to Telegram for approval')
+                  } catch (err) {
+                    alert('Failed: ' + (err.response?.data?.detail || err.message))
+                  }
+                }}
+                className="ml-2 px-5 py-3 rounded-lg font-semibold text-sm shadow transition flex items-center gap-2 bg-sky-600 hover:bg-sky-700 text-white"
+              >
+                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/>
+                </svg>
+                Send to Telegram
               </button>
             </div>
 
@@ -929,9 +967,6 @@ function App() {
           />
         )}
 
-        {activeTab === 'live-view' && (
-          <LiveViewDashboard />
-        )}
       </div>
         </>
       )}
