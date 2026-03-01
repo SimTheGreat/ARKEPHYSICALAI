@@ -22,6 +22,7 @@ function App() {
   const [productionStates, setProductionStates] = useState([])
   const [loadingStates, setLoadingStates] = useState(false)
   const [lineVisionPhase, setLineVisionPhase] = useState('NOT_PRESENT')
+  const [productionLog, setProductionLog] = useState([])
   const timelineRef = useRef(null)
   const timelineInstance = useRef(null)
   const autoAdvanceRef = useRef({
@@ -34,6 +35,7 @@ function App() {
   useEffect(() => {
     fetchSchedule()
     fetchProductionStates()
+    fetchProductionLog()
   }, [])
 
   useEffect(() => {
@@ -146,12 +148,24 @@ function App() {
       const response = await axios.get('http://localhost:8000/api/scheduler/schedule')
       setSchedule(response.data)
       setError(null)
+      // Refresh log after schedule recalculation (new version may have been created)
+      fetchProductionLog()
     } catch (err) {
       setError(err.message)
     } finally {
       setLoading(false)
     }
   }
+
+  const fetchProductionLog = async () => {
+    try {
+      const response = await axios.get('http://localhost:8000/api/production-log')
+      setProductionLog(response.data || [])
+    } catch (err) {
+      console.error('Failed to fetch production log:', err)
+    }
+  }
+
   const fetchProductionStates = async () => {
     try {
       setLoadingStates(true)
@@ -723,122 +737,127 @@ function App() {
 
         {activeTab === 'log' && (
           <div className="space-y-4">
-            {/* Success Banner */}
-            <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-              <div className="flex items-center gap-2">
-                <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <span className="font-semibold text-green-900">Scheduling Completed Successfully</span>
-              </div>
-              <p className="text-sm text-green-700 mt-1 ml-7">
-                {schedule?.production_plans?.length || 0} orders scheduled using EDF (Earliest Deadline First) policy
-              </p>
-            </div>
-
-            {/* Event Log */}
-            <div className="bg-white rounded-lg shadow">
-              <div className="px-6 py-4 border-b border-gray-200">
-                <h2 className="text-lg font-semibold text-gray-900">Scheduling Events</h2>
-                <p className="text-sm text-gray-500 mt-1">Chronological log of scheduling decisions</p>
-              </div>
-              
-              <div className="divide-y divide-gray-100">
-                {schedule?.production_plans?.map((plan, index) => {
-                  // Check if this order is involved in a priority override
-                  const isOverride = schedule?.conflicts?.some(c => 
-                    c.priority_first.order === plan.order_number || 
-                    c.edf_first.order === plan.order_number
-                  )
-                  const overrideInfo = schedule?.conflicts?.find(c => 
-                    c.edf_first.order === plan.order_number
-                  )
-                  
-                  return (
-                    <div key={index} className={`px-6 py-4 ${
-                      isOverride ? 'bg-yellow-50' : 'hover:bg-gray-50'
-                    } transition`}>
-                      <div className="flex items-start gap-4">
-                        {/* Event Number */}
-                        <div className="flex-shrink-0">
-                          <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-blue-100 text-blue-700 font-semibold text-sm">
-                            {index + 1}
-                          </span>
-                        </div>
-                        
-                        {/* Event Details */}
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-2">
-                            <h3 className="font-semibold text-gray-900">{plan.order_number}</h3>
-                            <span className={`px-2 py-0.5 rounded text-xs font-medium ${getPriorityColor(plan.priority)}`}>
-                              P{plan.priority} - {getPriorityLabel(plan.priority)}
-                            </span>
-                          </div>
-                          
-                          <div className="text-sm text-gray-600 space-y-1">
-                            <div className="flex items-center gap-2">
-                              <span className="text-gray-500">Customer:</span>
-                              <span className="font-medium">{plan.customer}</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-gray-500">Product:</span>
-                              <span className="font-medium">{plan.quantity}x {plan.product}</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-gray-500">Scheduled:</span>
-                              <span className="font-medium">{formatDate(plan.starts_at)} → {formatDate(plan.ends_at)}</span>
-                            </div>
-                          </div>
-
-                          {/* EDF Reasoning */}
-                          <div className="mt-2 text-sm">
-                            <span className="text-gray-700">{plan.reasoning}</span>
-                          </div>
-
-                          {/* Priority Override Notice */}
-                          {overrideInfo && (
-                            <div className="mt-3 bg-yellow-100 border border-yellow-300 rounded-lg p-3">
-                              <div className="flex items-start gap-2">
-                                <svg className="h-5 w-5 text-yellow-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                </svg>
-                                <div className="text-sm">
-                                  <p className="font-semibold text-yellow-900">EDF Policy Override</p>
-                                  <p className="text-yellow-800 mt-1">{overrideInfo.resolution}</p>
-                                </div>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-
-              {/* Summary Footer */}
-              <div className="px-6 py-4 bg-gray-50 border-t border-gray-200">
-                <div className="grid grid-cols-3 gap-4 text-sm">
-                  <div>
-                    <span className="text-gray-500">Total Orders:</span>
-                    <span className="ml-2 font-semibold text-gray-900">{schedule?.production_plans?.length || 0}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Timespan:</span>
-                    <span className="ml-2 font-semibold text-gray-900">
-                      {schedule?.production_plans?.length > 0 && 
-                        formatDate(schedule.production_plans[0].starts_at) + ' - ' + 
-                        formatDate(schedule.production_plans[schedule.production_plans.length - 1].ends_at)
-                      }
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Policy:</span>
-                    <span className="ml-2 font-semibold text-blue-600">EDF</span>
-                  </div>
+            {/* Header */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-slate-800 flex items-center justify-center">
+                  <svg className="h-4.5 w-4.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-base font-semibold text-gray-900">Production Log</h2>
+                  <p className="text-xs text-gray-400">Schedule changes, conflicts &amp; events</p>
                 </div>
               </div>
+              <div className="flex items-center gap-2">
+                {schedule?.schedule_version && (
+                  <span className="text-[11px] font-semibold text-slate-500 bg-slate-100 rounded-md px-2.5 py-1 font-mono">
+                    v{schedule.schedule_version}
+                  </span>
+                )}
+                <span className="text-[11px] font-medium text-gray-400 bg-gray-50 rounded-md px-2.5 py-1">
+                  {productionLog.length} entries
+                </span>
+                <button
+                  onClick={fetchProductionLog}
+                  className="ml-1 p-1.5 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition"
+                  title="Refresh log"
+                >
+                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
+              </div>
             </div>
+
+            {productionLog.length === 0 ? (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
+                <div className="mx-auto w-14 h-14 rounded-full bg-gray-50 flex items-center justify-center mb-4">
+                  <svg className="h-7 w-7 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                </div>
+                <p className="text-gray-400 text-sm">No log entries yet. Generate a schedule to start logging.</p>
+              </div>
+            ) : (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                {/* Group entries by version */}
+                {(() => {
+                  // Group log entries by schedule_version (descending)
+                  const grouped = []
+                  let currentVersion = null
+                  let currentGroup = null
+                  productionLog.forEach(entry => {
+                    const v = entry.schedule_version
+                    if (v !== currentVersion) {
+                      currentVersion = v
+                      currentGroup = { version: v, entries: [] }
+                      grouped.push(currentGroup)
+                    }
+                    currentGroup.entries.push(entry)
+                  })
+
+                  return grouped.map((group, gi) => (
+                    <div key={gi}>
+                      {/* Version separator */}
+                      <div className="sticky top-0 z-10 px-5 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-2">
+                        <span className="text-[11px] font-bold text-slate-600 font-mono bg-white border border-gray-200 rounded px-2 py-0.5">
+                          v{group.version}
+                        </span>
+                        <div className="flex-1 h-px bg-gray-200"></div>
+                        <span className="text-[10px] text-gray-400">
+                          {group.entries.length} {group.entries.length === 1 ? 'event' : 'events'}
+                        </span>
+                      </div>
+                      <div className="divide-y divide-gray-50">
+                        {group.entries.map((entry) => {
+                          const levelConfig = {
+                            info:    { dot: 'bg-blue-500', badge: 'bg-blue-50 text-blue-600 ring-blue-500/20' },
+                            warning: { dot: 'bg-amber-400', badge: 'bg-amber-50 text-amber-700 ring-amber-500/20' },
+                            change:  { dot: 'bg-violet-500', badge: 'bg-violet-50 text-violet-600 ring-violet-500/20' },
+                            error:   { dot: 'bg-red-500', badge: 'bg-red-50 text-red-600 ring-red-500/20' },
+                          }
+                          const cfg = levelConfig[entry.level] || levelConfig.info
+
+                          return (
+                            <div key={entry.id} className="group px-5 py-3 hover:bg-gray-50/60 transition flex items-start gap-3">
+                              {/* Timeline dot */}
+                              <div className="flex flex-col items-center pt-1.5 flex-shrink-0">
+                                <span className={`w-2 h-2 rounded-full ${cfg.dot} ring-4 ring-white`}></span>
+                              </div>
+                              {/* Content */}
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium text-[13px] text-gray-900">{entry.title}</span>
+                                  <span className={`text-[10px] font-semibold rounded-md px-1.5 py-0.5 ring-1 ring-inset ${cfg.badge}`}>
+                                    {entry.level}
+                                  </span>
+                                  {entry.order_number && (
+                                    <span className="text-[11px] font-mono font-medium text-gray-400 bg-gray-100 rounded px-1.5 py-0.5">
+                                      {entry.order_number}
+                                    </span>
+                                  )}
+                                </div>
+                                {entry.detail && (
+                                  <p className="text-xs text-gray-500 mt-1 leading-relaxed">{entry.detail}</p>
+                                )}
+                              </div>
+                              {/* Timestamp */}
+                              <span className="text-[11px] text-gray-300 group-hover:text-gray-400 flex-shrink-0 whitespace-nowrap pt-0.5 transition font-mono">
+                                {entry.timestamp && new Date(entry.timestamp).toLocaleTimeString('en-US', {
+                                  hour: '2-digit', minute: '2-digit', second: '2-digit'
+                                })}
+                              </span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ))
+                })()}
+              </div>
+            )}
           </div>
         )}
 

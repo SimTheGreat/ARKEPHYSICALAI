@@ -15,7 +15,13 @@ import time
 from request import ArkeAPI
 from scheduler import ProductionScheduler, SchedulingPolicy
 from production import ProductionOrderManager
-from database import init_db, get_db, ProductionState, create_production_state, get_production_state, finish_operation, get_all_production_states, get_active_order_on_line, clear_production_line, OPERATION_ORDER
+from database import (
+    init_db, get_db, ProductionState, create_production_state,
+    get_production_state, finish_operation, get_all_production_states,
+    get_active_order_on_line, clear_production_line, OPERATION_ORDER,
+    save_schedule, get_persisted_schedule, get_production_logs,
+    add_production_log, ProductionLog, ScheduleEntry,
+)
 
 try:
     import cv2  # type: ignore
@@ -817,9 +823,10 @@ async def get_sales_orders():
 
 
 @app.get("/api/scheduler/schedule")
-async def get_production_schedule():
+async def get_production_schedule(db: Session = Depends(get_db)):
     """
-    Generate production schedule using EDF policy
+    Generate production schedule using EDF policy.
+    Persists the schedule and logs any changes vs. the previous version.
     
     Returns:
         Production schedule with conflict detection
@@ -839,29 +846,55 @@ async def get_production_schedule():
         # Generate summary
         summary = scheduler.generate_schedule_summary(production_plans, conflicts)
         
+        # Build plan dicts (shared by response + persistence)
+        plan_dicts = [
+            {
+                "order_number": p.sales_order_number,
+                "customer": p.customer,
+                "product": p.product_name,
+                "quantity": p.quantity,
+                "priority": p.priority,
+                "starts_at": p.starts_at.isoformat(),
+                "ends_at": p.ends_at.isoformat(),
+                "deadline": p.deadline.isoformat(),
+                "reasoning": p.reasoning,
+            }
+            for p in production_plans
+        ]
+
+        # Persist schedule & diff against previous version
+        new_version = save_schedule(db, plan_dicts, conflicts)
+        
         return {
             "policy": "EDF (Earliest Deadline First)",
             "generated_at": scheduler.CURRENT_DATE.isoformat(),
-            "production_plans": [
-                {
-                    "order_number": p.sales_order_number,
-                    "customer": p.customer,
-                    "product": p.product_name,
-                    "quantity": p.quantity,
-                    "priority": p.priority,
-                    "starts_at": p.starts_at.isoformat(),
-                    "ends_at": p.ends_at.isoformat(),
-                    "deadline": p.deadline.isoformat(),
-                    "reasoning": p.reasoning
-                }
-                for p in production_plans
-            ],
+            "schedule_version": new_version,
+            "production_plans": plan_dicts,
             "conflicts": conflicts,
-            "summary": summary
+            "summary": summary,
         }
     except Exception as e:
         logger.error(f"Error generating schedule: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/production-log")
+async def get_log(limit: int = 200, db: Session = Depends(get_db)):
+    """Return recent production log entries, newest first."""
+    entries = get_production_logs(db, limit=limit)
+    return [
+        {
+            "id": e.id,
+            "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+            "level": e.level,
+            "category": e.category,
+            "title": e.title,
+            "detail": e.detail,
+            "order_number": e.order_number,
+            "schedule_version": e.schedule_version,
+        }
+        for e in entries
+    ]
 
 
 @app.get("/api/scheduler/conflicts")

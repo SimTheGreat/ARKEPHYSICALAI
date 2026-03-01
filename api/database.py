@@ -4,7 +4,7 @@ Database connection and models for production state tracking
 import os
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import create_engine, Column, String, DateTime, Boolean
+from sqlalchemy import create_engine, Column, String, DateTime, Boolean, Integer, Float, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import logging
@@ -60,6 +60,268 @@ class ProductionState(Base):
     # Pack
     op_pack_required = Column(Boolean, default=False, comment="Is Pack required for this order")
     op_pack_finished_at = Column(DateTime, nullable=True, comment="Pack operation completed timestamp")
+
+
+class ScheduleEntry(Base):
+    """
+    Persisted schedule – one row per order in the current schedule.
+    Replaced in bulk each time the schedule is (re)calculated.
+    """
+    __tablename__ = "schedule_entry"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    schedule_version = Column(Integer, nullable=False, index=True, comment="Monotonic version counter")
+    position = Column(Integer, nullable=False, comment="1-based position in schedule")
+    order_number = Column(String, nullable=False)
+    customer = Column(String, nullable=True)
+    product = Column(String, nullable=True)
+    quantity = Column(Integer, nullable=True)
+    priority = Column(Integer, nullable=True)
+    starts_at = Column(String, nullable=True)
+    ends_at = Column(String, nullable=True)
+    deadline = Column(String, nullable=True)
+    reasoning = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProductionLog(Base):
+    """
+    Append-only log of schedule changes, warnings, and events.
+    """
+    __tablename__ = "production_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    level = Column(String, nullable=False, comment="info | warning | change | error")
+    category = Column(String, nullable=False, comment="schedule | conflict | order | operation")
+    title = Column(String, nullable=False)
+    detail = Column(Text, nullable=True)
+    order_number = Column(String, nullable=True, index=True)
+    schedule_version = Column(Integer, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# Schedule persistence helpers
+# ---------------------------------------------------------------------------
+
+def _get_current_schedule_version(db: Session) -> int:
+    """Return the latest schedule version or 0 if none exists."""
+    row = db.query(ScheduleEntry.schedule_version).order_by(
+        ScheduleEntry.schedule_version.desc()
+    ).first()
+    return row[0] if row else 0
+
+
+def get_persisted_schedule(db: Session) -> list:
+    """Return the latest schedule entries ordered by position."""
+    version = _get_current_schedule_version(db)
+    if version == 0:
+        return []
+    return (
+        db.query(ScheduleEntry)
+        .filter(ScheduleEntry.schedule_version == version)
+        .order_by(ScheduleEntry.position)
+        .all()
+    )
+
+
+def save_schedule(db: Session, plans: list, conflicts: list) -> int:
+    """
+    Persist a new schedule, compare with previous, log diffs.
+
+    Args:
+        db:        Database session
+        plans:     List of dicts (the production_plans payload)
+        conflicts: List of conflict dicts from scheduler
+
+    Returns:
+        Schedule version number (existing if unchanged, new if changed)
+    """
+    old_version = _get_current_schedule_version(db)
+
+    # ── Fetch old schedule for comparison ──
+    old_entries = (
+        db.query(ScheduleEntry)
+        .filter(ScheduleEntry.schedule_version == old_version)
+        .order_by(ScheduleEntry.position)
+        .all()
+    ) if old_version > 0 else []
+
+    old_by_order = {e.order_number: e for e in old_entries}
+    old_order_list = [e.order_number for e in old_entries]
+    new_order_list = [p["order_number"] for p in plans]
+
+    # ── Check if schedule actually changed ──
+    schedule_changed = _schedule_has_changed(old_entries, plans, old_order_list, new_order_list)
+
+    if not schedule_changed and old_version > 0:
+        logger.info(f"Schedule unchanged, staying at v{old_version}")
+        return old_version
+
+    new_version = old_version + 1
+
+    # ── Write new entries ──
+    for idx, p in enumerate(plans, start=1):
+        db.add(ScheduleEntry(
+            schedule_version=new_version,
+            position=idx,
+            order_number=p["order_number"],
+            customer=p.get("customer"),
+            product=p.get("product"),
+            quantity=p.get("quantity"),
+            priority=p.get("priority"),
+            starts_at=p.get("starts_at"),
+            ends_at=p.get("ends_at"),
+            deadline=p.get("deadline"),
+            reasoning=p.get("reasoning"),
+        ))
+
+    # ── Diff & log ──
+    if old_version == 0:
+        # First schedule ever
+        _add_log(db, "info", "schedule", "Schedule created",
+                 f"Initial schedule with {len(plans)} orders (v{new_version})",
+                 schedule_version=new_version)
+        # Log conflicts once for the initial schedule
+        for c in conflicts:
+            _add_log(db, "warning", "conflict", "EDF vs Priority conflict",
+                     c.get("resolution", ""),
+                     order_number=c.get("edf_first", {}).get("order"),
+                     schedule_version=new_version)
+    else:
+        _diff_schedules(db, old_by_order, old_order_list, plans, new_order_list, new_version)
+        # Only log *new* conflicts that weren't present in the previous version
+        _log_new_conflicts(db, conflicts, old_version, new_version)
+
+    db.commit()
+    logger.info(f"Saved schedule v{new_version} with {len(plans)} entries")
+    return new_version
+
+
+def _schedule_has_changed(old_entries, new_plans, old_order_list, new_order_list):
+    """Return True if the schedule differs from the previous version."""
+    if len(old_entries) != len(new_plans):
+        return True
+    if old_order_list != new_order_list:
+        return True
+    # Check priorities changed
+    for old_e, new_p in zip(old_entries, new_plans):
+        if old_e.priority != new_p.get("priority"):
+            return True
+        if old_e.starts_at != new_p.get("starts_at"):
+            return True
+        if old_e.ends_at != new_p.get("ends_at"):
+            return True
+        if old_e.deadline != new_p.get("deadline"):
+            return True
+    return False
+
+
+def _log_new_conflicts(db, conflicts, old_version, new_version):
+    """Only log conflicts whose resolution text wasn't already logged."""
+    # Gather resolutions already logged for the previous version
+    existing = set()
+    prev_logs = (
+        db.query(ProductionLog.detail)
+        .filter(
+            ProductionLog.schedule_version == old_version,
+            ProductionLog.category == "conflict",
+        )
+        .all()
+    )
+    for row in prev_logs:
+        if row[0]:
+            existing.add(row[0])
+
+    for c in conflicts:
+        resolution = c.get("resolution", "")
+        if resolution not in existing:
+            _add_log(db, "warning", "conflict", "EDF vs Priority conflict",
+                     resolution,
+                     order_number=c.get("edf_first", {}).get("order"),
+                     schedule_version=new_version)
+
+
+def _diff_schedules(db, old_by_order, old_order_list, new_plans, new_order_list, version):
+    """Compare old ↔ new schedule and write change log entries."""
+    new_by_order = {p["order_number"]: p for p in new_plans}
+
+    # Orders added
+    for on in new_order_list:
+        if on not in old_by_order:
+            _add_log(db, "change", "schedule", f"Order {on} added to schedule",
+                     f"New order appeared in schedule at position {new_order_list.index(on) + 1}",
+                     order_number=on, schedule_version=version)
+
+    # Orders removed
+    for on in old_order_list:
+        if on not in new_by_order:
+            _add_log(db, "change", "schedule", f"Order {on} removed from schedule",
+                     f"Order no longer present in new schedule",
+                     order_number=on, schedule_version=version)
+
+    # Position changes & priority changes
+    for idx, p in enumerate(new_plans):
+        on = p["order_number"]
+        if on in old_by_order:
+            old = old_by_order[on]
+            old_pos = old_order_list.index(on) + 1
+            new_pos = idx + 1
+            if old_pos != new_pos:
+                direction = "up" if new_pos < old_pos else "down"
+                _add_log(db, "change", "schedule",
+                         f"Order {on} moved {direction}",
+                         f"Position changed from #{old_pos} to #{new_pos}",
+                         order_number=on, schedule_version=version)
+
+            old_prio = old.priority
+            new_prio = p.get("priority")
+            if old_prio is not None and new_prio is not None and old_prio != new_prio:
+                _add_log(db, "change", "schedule",
+                         f"Order {on} priority changed",
+                         f"Priority changed from P{old_prio} to P{new_prio}",
+                         order_number=on, schedule_version=version)
+
+    # Detect swaps (adjacent pair that swapped)
+    for i in range(len(old_order_list) - 1):
+        a, b = old_order_list[i], old_order_list[i + 1]
+        if a in new_by_order and b in new_by_order:
+            new_a = new_order_list.index(a)
+            new_b = new_order_list.index(b)
+            if new_b < new_a:  # b now comes before a = swap
+                _add_log(db, "change", "schedule",
+                         f"Orders {b} and {a} swapped",
+                         f"{b} (was #{i+2}) now scheduled before {a} (was #{i+1})",
+                         schedule_version=version)
+
+
+def _add_log(db, level, category, title, detail=None, order_number=None, schedule_version=None):
+    db.add(ProductionLog(
+        level=level,
+        category=category,
+        title=title,
+        detail=detail,
+        order_number=order_number,
+        schedule_version=schedule_version,
+    ))
+
+
+def add_production_log(db: Session, level: str, category: str, title: str,
+                       detail: str = None, order_number: str = None,
+                       schedule_version: int = None):
+    """Public helper to append a log entry (auto-commits)."""
+    _add_log(db, level, category, title, detail, order_number, schedule_version)
+    db.commit()
+
+
+def get_production_logs(db: Session, limit: int = 100) -> list:
+    """Return recent production log entries, newest first."""
+    return (
+        db.query(ProductionLog)
+        .order_by(ProductionLog.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
 
 
 def init_db():
