@@ -1874,7 +1874,7 @@ async def send_schedule_to_telegram(db: Session = Depends(get_db)):
         "reply_markup": {
             "inline_keyboard": [[
                 {"text": "✅ Approve", "callback_data": f"SCHED|{approval_id}|APPROVE"},
-                {"text": "❌ Reject", "callback_data": f"SCHED|{approval_id}|REJECT"},
+                {"text": "✏️ Modify", "callback_data": f"SCHED|{approval_id}|MODIFY"},
             ]]
         },
     })
@@ -1961,23 +1961,61 @@ async def telegram_webhook(
                     except Exception as e:
                         logger.error(f"Auto-push after approval failed: {e}")
 
-                # Acknowledge
-                try:
-                    _telegram_api_call("answerCallbackQuery", {
-                        "callback_query_id": callback_query.get("id"),
-                        "text": f"Schedule {choice}D",
-                        "show_alert": False,
-                    })
-                    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
-                    if chat_id:
-                        emoji = "✅" if choice == "APPROVE" else "❌"
-                        _telegram_api_call("sendMessage", {
-                            "chat_id": chat_id,
-                            "text": f"{emoji} Schedule {choice.lower()}d. "
-                                    + ("Orders pushed to Arke." if choice == "APPROVE" else ""),
+                # If modify → ask for details
+                if choice == "MODIFY":
+                    try:
+                        chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+                        _telegram_api_call("answerCallbackQuery", {
+                            "callback_query_id": callback_query.get("id"),
+                            "text": "Modification requested",
+                            "show_alert": False,
                         })
-                except Exception:
-                    pass
+                        if chat_id:
+                            _telegram_api_call("sendMessage", {
+                                "chat_id": chat_id,
+                                "text": (
+                                    "✏️ *Modification requested*\n\n"
+                                    "Please describe the changes you'd like:\n"
+                                    "• _Move SO-005 before SO-003_\n"
+                                    "• _Change policy to group-by-product_\n"
+                                    "• _Split large batches at 10 units_\n\n"
+                                    "The agent will recalculate and send a new schedule."
+                                ),
+                                "parse_mode": "Markdown",
+                            })
+                    except Exception:
+                        pass
+
+                # Acknowledge approve
+                elif choice == "APPROVE":
+                    try:
+                        _telegram_api_call("answerCallbackQuery", {
+                            "callback_query_id": callback_query.get("id"),
+                            "text": "Schedule approved!",
+                            "show_alert": False,
+                        })
+                        chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+                        if chat_id:
+                            _telegram_api_call("sendMessage", {
+                                "chat_id": chat_id,
+                                "text": "✅ *Schedule approved & pushed to Arke!*\n\n"
+                                        "All production orders have been created, phases scheduled, "
+                                        "and confirmed. First phases are now ready to start.",
+                                "parse_mode": "Markdown",
+                            })
+                    except Exception:
+                        pass
+
+                else:
+                    # Generic reject
+                    try:
+                        _telegram_api_call("answerCallbackQuery", {
+                            "callback_query_id": callback_query.get("id"),
+                            "text": f"Schedule {choice.lower()}ed",
+                            "show_alert": False,
+                        })
+                    except Exception:
+                        pass
 
             return {"ok": True, "handled": True, "approval": approval}
 
