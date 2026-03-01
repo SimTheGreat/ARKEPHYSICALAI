@@ -63,6 +63,7 @@ class ProductionScheduler:
         self.policy = policy
         self.arke = arke_client
         self.product_bom_cache = {}
+        self.product_id_map = {}  # extra_id → UUID
     
     def load_product_bom_data(self) -> Dict[str, float]:
         """Fetch product BOM data from Arke API"""
@@ -72,6 +73,21 @@ class ProductionScheduler:
             
             for product in products:
                 product_name = product.get("name", "")
+                product_uuid = product.get("id", "")
+                internal_id = product.get("internal_id", "")
+                extra_id = product.get("extra_id", "")
+                
+                # Build internal_id/extra_id → UUID lookup
+                if product_uuid:
+                    if internal_id:
+                        self.product_id_map[internal_id] = product_uuid
+                    if extra_id:
+                        self.product_id_map[extra_id] = product_uuid
+                    # Also map by name as last resort
+                    if product_name:
+                        self.product_id_map[product_name] = product_uuid
+                    logger.info(f"Product map: {internal_id or extra_id} → {product_uuid}")
+                
                 plan = product.get("plan", {})
                 
                 # Handle different plan structures
@@ -134,11 +150,26 @@ class ProductionScheduler:
                     if not product_name or quantity == 0:
                         continue
                     
+                    # Try multiple field names for the product code
+                    raw_pid = (product_item.get("extra_id")
+                               or product_item.get("internal_id")
+                               or product_item.get("product_id")
+                               or product_item.get("id")
+                               or "")
+                    # Resolve to real UUID via product map
+                    if not self.product_id_map:
+                        self.load_product_bom_data()
+                    pid = self.product_id_map.get(raw_pid, raw_pid)
+                    # If still not a UUID, try by product name
+                    if len(pid) < 32 and product_name in self.product_id_map:
+                        pid = self.product_id_map[product_name]
+                    logger.info(f"Product '{product_name}': raw={raw_pid} → uuid={pid}")
+                    
                     sales_orders.append(SalesOrder(
                         id=order_id,
                         order_number=order_number,
                         customer=customer,
-                        product_id=product_item.get("extra_id", ""),
+                        product_id=pid,
                         product_name=product_name,
                         quantity=quantity,
                         deadline=deadline,

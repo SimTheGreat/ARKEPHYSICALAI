@@ -21,6 +21,7 @@ from database import (
     get_active_order_on_line, clear_production_line, OPERATION_ORDER,
     save_schedule, get_persisted_schedule, get_production_logs,
     add_production_log, ProductionLog, ScheduleEntry,
+    ArkePushRecord, get_push_status, get_push_record, upsert_push_record,
 )
 
 try:
@@ -921,30 +922,138 @@ async def detect_scheduling_conflicts():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/production/create")
-async def create_production_orders():
+@app.get("/api/debug/products")
+async def debug_products():
+    """Debug: show raw product data from Arke to inspect IDs and structure"""
+    products = arke_client.get("/product/product")
+    # Return first 2 products with all fields for inspection
+    return {"count": len(products), "sample": products[:2]}
+
+
+@app.get("/api/debug/sales-orders")
+async def debug_sales_orders():
+    """Debug: show raw sales order data to inspect product refs"""
+    orders = arke_client.get("/sales/order/_active")
+    # Return first order with full structure
+    return {"count": len(orders), "sample": orders[:1]}
+
+
+@app.get("/api/production/push-status")
+async def get_production_push_status(db: Session = Depends(get_db)):
     """
-    Create production orders in Arke from EDF schedule
-    
-    Returns:
-        List of created production orders
+    Return push status for every order that has been pushed (or attempted).
+    """
+    records = get_push_status(db)
+    return [
+        {
+            "order_number": r.order_number,
+            "status": r.status,
+            "arke_production_order_id": r.arke_production_order_id,
+            "error_message": r.error_message,
+            "pushed_at": r.pushed_at.isoformat() if r.pushed_at else None,
+        }
+        for r in records
+    ]
+
+
+@app.post("/api/production/push")
+async def push_production_orders(db: Session = Depends(get_db)):
+    """
+    Push production orders to Arke with idempotency.
+
+    - Skips orders already marked 'pushed'.
+    - Retries orders marked 'failed'.
+    - Records success/failure per order in ArkePushRecord.
+    - Logs every event to the production log.
     """
     try:
-        logger.info("Creating production orders")
-        
+        logger.info("Push to Arke triggered")
+
+        # Build the current EDF schedule
         orders = arke_client.get("/sales/order/_active")
         sales_orders = scheduler.parse_sales_orders(orders)
         production_plans = scheduler.create_edf_schedule(sales_orders)
-        
-        # Create production orders in Arke
-        results = production_manager.create_full_schedule(production_plans)
-        
+
+        results = []
+        skipped = 0
+        created = 0
+        failed = 0
+
+        for plan in production_plans:
+            order_no = plan.sales_order_number
+
+            # ── Idempotency check ──
+            existing = get_push_record(db, order_no)
+            if existing and existing.status == "pushed":
+                results.append({
+                    "order_number": order_no,
+                    "status": "skipped",
+                    "arke_production_order_id": existing.arke_production_order_id,
+                })
+                skipped += 1
+                continue
+
+            # ── Mark as pushing ──
+            upsert_push_record(db, order_no, status="pushing")
+
+            try:
+                # Step 3: Create production order in Arke
+                production_order = production_manager.create_production_order(plan)
+                arke_po_id = production_order.get("id", "")
+
+                # Step 4: Schedule phases
+                scheduled = production_manager.schedule_phases(arke_po_id)
+
+                # ── Record success ──
+                upsert_push_record(db, order_no, status="pushed",
+                                   arke_id=arke_po_id, error=None)
+                add_production_log(
+                    db, level="info", category="push",
+                    title=f"{order_no} pushed to Arke",
+                    detail=f"Production order {arke_po_id} created and phases scheduled",
+                    order_number=order_no,
+                )
+
+                results.append({
+                    "order_number": order_no,
+                    "status": "pushed",
+                    "arke_production_order_id": arke_po_id,
+                })
+                created += 1
+
+            except Exception as order_err:
+                error_msg = str(order_err)
+                logger.error(f"Failed to push {order_no}: {error_msg}")
+
+                upsert_push_record(db, order_no, status="failed",
+                                   error=error_msg)
+                add_production_log(
+                    db, level="error", category="push",
+                    title=f"{order_no} push failed",
+                    detail=error_msg,
+                    order_number=order_no,
+                )
+
+                results.append({
+                    "order_number": order_no,
+                    "status": "failed",
+                    "error": error_msg,
+                })
+                failed += 1
+
+        summary = f"Pushed {created}, skipped {skipped}, failed {failed}"
+        logger.info(summary)
+
         return {
-            "created": len(results),
-            "production_orders": results
+            "summary": summary,
+            "created": created,
+            "skipped": skipped,
+            "failed": failed,
+            "results": results,
         }
+
     except Exception as e:
-        logger.error(f"Error creating production orders: {str(e)}")
+        logger.error(f"Error in push to Arke: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

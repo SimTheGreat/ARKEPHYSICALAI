@@ -100,6 +100,67 @@ class ProductionLog(Base):
     schedule_version = Column(Integer, nullable=True)
 
 
+class ArkePushRecord(Base):
+    """
+    Tracks which orders have been pushed to Arke (idempotency guard).
+    One row per sales-order number.  Re-triggering the push skips
+    orders that already have status='pushed'.
+    """
+    __tablename__ = "arke_push_record"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_number = Column(String, nullable=False, unique=True, index=True)
+    status = Column(String, nullable=False, default="pending",
+                    comment="pending | pushing | pushed | failed")
+    arke_production_order_id = Column(String, nullable=True,
+                                     comment="ID returned by Arke after creation")
+    error_message = Column(Text, nullable=True)
+    pushed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Arke push helpers
+# ---------------------------------------------------------------------------
+
+def get_push_status(db: Session) -> list:
+    """Return all push records."""
+    return db.query(ArkePushRecord).order_by(ArkePushRecord.created_at).all()
+
+
+def get_push_record(db: Session, order_number: str) -> Optional[ArkePushRecord]:
+    """Return the push record for a specific order, or None."""
+    return db.query(ArkePushRecord).filter(
+        ArkePushRecord.order_number == order_number
+    ).first()
+
+
+def upsert_push_record(
+    db: Session,
+    order_number: str,
+    status: str,
+    arke_id: str = None,
+    error: str = None,
+) -> ArkePushRecord:
+    """Create or update a push record for an order."""
+    record = get_push_record(db, order_number)
+    if record is None:
+        record = ArkePushRecord(order_number=order_number)
+        db.add(record)
+    record.status = status
+    if arke_id:
+        record.arke_production_order_id = arke_id
+    if error is not None:
+        record.error_message = error
+    if status == "pushed":
+        record.pushed_at = datetime.utcnow()
+    record.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(record)
+    return record
+
+
 # ---------------------------------------------------------------------------
 # Schedule persistence helpers
 # ---------------------------------------------------------------------------

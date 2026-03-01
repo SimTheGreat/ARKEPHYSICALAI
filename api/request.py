@@ -66,6 +66,8 @@ class ArkeAPI:
         headers = self.get_headers()
 
         response = requests.post(url, headers=headers, json=data)
+        if not response.ok:
+            print(f"POST {url} → {response.status_code}: {response.text}")
         response.raise_for_status()
         return response.json()
 
@@ -74,6 +76,8 @@ class ArkeAPI:
         headers = self.get_headers()
 
         response = requests.put(url, headers=headers, json=data)
+        if not response.ok:
+            print(f"PUT {url} → {response.status_code}: {response.text}")
         response.raise_for_status()
         return response.json()
 

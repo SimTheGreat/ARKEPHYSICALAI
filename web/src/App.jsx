@@ -23,6 +23,9 @@ function App() {
   const [loadingStates, setLoadingStates] = useState(false)
   const [lineVisionPhase, setLineVisionPhase] = useState('NOT_PRESENT')
   const [productionLog, setProductionLog] = useState([])
+  const [pushStatus, setPushStatus] = useState({})
+  const [pushing, setPushing] = useState(false)
+  const [logFilter, setLogFilter] = useState('schedule')
   const timelineRef = useRef(null)
   const timelineInstance = useRef(null)
   const autoAdvanceRef = useRef({
@@ -36,7 +39,40 @@ function App() {
     fetchSchedule()
     fetchProductionStates()
     fetchProductionLog()
+    fetchPushStatus()
   }, [])
+
+  // Fetch push status for all orders
+  const fetchPushStatus = async () => {
+    try {
+      const response = await axios.get('/api/production/push-status')
+      const map = {}
+      for (const r of response.data) {
+        map[r.order_number] = r
+      }
+      setPushStatus(map)
+    } catch (err) {
+      console.error('Failed to fetch push status', err)
+    }
+  }
+
+  // Push all orders to Arke
+  const pushToArke = async () => {
+    setPushing(true)
+    try {
+      const response = await axios.post('/api/production/push')
+      // Refresh push status + log
+      await fetchPushStatus()
+      await fetchProductionLog()
+      const { created, skipped, failed } = response.data
+      alert(`Push complete: ${created} created, ${skipped} already pushed, ${failed} failed`)
+    } catch (err) {
+      console.error('Push to Arke failed', err)
+      alert('Push to Arke failed: ' + (err.response?.data?.detail || err.message))
+    } finally {
+      setPushing(false)
+    }
+  }
 
   useEffect(() => {
     if (schedule && activeTab === 'gantt' && timelineRef.current && window.vis) {
@@ -466,25 +502,64 @@ function App() {
 
         {activeTab === 'schedule' && (
           <div className="space-y-4">
-            {/* Stats */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-              <div className="bg-white rounded-lg shadow p-4 border">
-                <div className="text-sm text-gray-500">Total Orders</div>
-                <div className="text-2xl font-bold text-gray-900">{schedule?.production_plans?.length || 0}</div>
+            {/* Stats + Push button */}
+            <div className="flex items-center justify-between mb-2">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 flex-1">
+                <div className="bg-white rounded-lg shadow p-4 border">
+                  <div className="text-sm text-gray-500">Total Orders</div>
+                  <div className="text-2xl font-bold text-gray-900">{schedule?.production_plans?.length || 0}</div>
+                </div>
+                <div className="bg-white rounded-lg shadow p-4 border">
+                  <div className="text-sm text-gray-500">Policy</div>
+                  <div className="text-2xl font-bold text-blue-600">EDF</div>
+                </div>
+                <div className="bg-white rounded-lg shadow p-4 border">
+                  <div className="text-sm text-gray-500">Conflicts Detected</div>
+                  <div className="text-2xl font-bold text-red-600">{schedule?.conflicts?.length || 0}</div>
+                </div>
+                <div className="bg-white rounded-lg shadow p-4 border">
+                  <div className="text-sm text-gray-500">Pushed to Arke</div>
+                  <div className="text-2xl font-bold text-green-600">
+                    {Object.values(pushStatus).filter(r => r.status === 'pushed').length}
+                    <span className="text-sm font-normal text-gray-400">
+                      {' / '}{schedule?.production_plans?.length || 0}
+                    </span>
+                  </div>
+                </div>
               </div>
-              <div className="bg-white rounded-lg shadow p-4 border">
-                <div className="text-sm text-gray-500">Policy</div>
-                <div className="text-2xl font-bold text-blue-600">EDF</div>
-              </div>
-              <div className="bg-white rounded-lg shadow p-4 border">
-                <div className="text-sm text-gray-500">Conflicts Detected</div>
-                <div className="text-2xl font-bold text-red-600">{schedule?.conflicts?.length || 0}</div>
-              </div>
+              <button
+                onClick={pushToArke}
+                disabled={pushing}
+                className={`ml-4 px-5 py-3 rounded-lg font-semibold text-sm shadow transition flex items-center gap-2 ${
+                  pushing
+                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                }`}
+              >
+                {pushing ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Pushing…
+                  </>
+                ) : (
+                  <>
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5-5m0 0l5 5m-5-5v12" />
+                    </svg>
+                    Push to Arke
+                  </>
+                )}
+              </button>
             </div>
 
             {/* Production Plans */}
             <div className="space-y-3">
-              {schedule?.production_plans?.map((plan, index) => (
+              {schedule?.production_plans?.map((plan, index) => {
+                const ps = pushStatus[plan.order_number]
+                return (
                 <div key={index} className="bg-white rounded-lg shadow-sm border hover:shadow-md transition">
                   <div className="p-4">
                     <div className="flex items-start justify-between">
@@ -495,6 +570,27 @@ function App() {
                           <span className={`px-3 py-1 rounded-full text-xs font-medium border ${getPriorityColor(plan.priority)}`}>
                             P{plan.priority} - {getPriorityLabel(plan.priority)}
                           </span>
+                          {/* Push status badge */}
+                          {ps?.status === 'pushed' && (
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700 border border-green-200">
+                              ✓ Pushed
+                            </span>
+                          )}
+                          {ps?.status === 'failed' && (
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 border border-red-200" title={ps.error_message}>
+                              ✗ Failed
+                            </span>
+                          )}
+                          {ps?.status === 'pushing' && (
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-700 border border-yellow-200 animate-pulse">
+                              ⏳ Pushing…
+                            </span>
+                          )}
+                          {!ps && (
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500 border border-gray-200">
+                              ○ Pending
+                            </span>
+                          )}
                         </div>
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                           <div>
@@ -527,7 +623,8 @@ function App() {
                     </div>
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )}
@@ -751,13 +848,36 @@ function App() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                {/* Log filter toggle */}
+                <div className="flex bg-gray-100 rounded-lg p-0.5">
+                  <button
+                    onClick={() => setLogFilter('schedule')}
+                    className={`text-[11px] font-medium px-2.5 py-1 rounded-md transition ${
+                      logFilter === 'schedule'
+                        ? 'bg-white text-gray-900 shadow-sm'
+                        : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    Schedule
+                  </button>
+                  <button
+                    onClick={() => setLogFilter('all')}
+                    className={`text-[11px] font-medium px-2.5 py-1 rounded-md transition ${
+                      logFilter === 'all'
+                        ? 'bg-white text-gray-900 shadow-sm'
+                        : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    Full System Log
+                  </button>
+                </div>
                 {schedule?.schedule_version && (
                   <span className="text-[11px] font-semibold text-slate-500 bg-slate-100 rounded-md px-2.5 py-1 font-mono">
                     v{schedule.schedule_version}
                   </span>
                 )}
                 <span className="text-[11px] font-medium text-gray-400 bg-gray-50 rounded-md px-2.5 py-1">
-                  {productionLog.length} entries
+                  {(logFilter === 'all' ? productionLog : productionLog.filter(e => e.category === 'schedule' || e.category === 'conflict')).length} entries
                 </span>
                 <button
                   onClick={fetchProductionLog}
@@ -784,12 +904,17 @@ function App() {
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 {/* Group entries by version */}
                 {(() => {
+                  // Filter entries based on toggle
+                  const filteredLog = logFilter === 'all'
+                    ? productionLog
+                    : productionLog.filter(e => e.category === 'schedule' || e.category === 'conflict')
+
                   // Group log entries by schedule_version (descending)
                   const grouped = []
-                  let currentVersion = null
+                  let currentVersion = Symbol('unset')
                   let currentGroup = null
-                  productionLog.forEach(entry => {
-                    const v = entry.schedule_version
+                  filteredLog.forEach(entry => {
+                    const v = entry.schedule_version ?? 'none'
                     if (v !== currentVersion) {
                       currentVersion = v
                       currentGroup = { version: v, entries: [] }
@@ -803,7 +928,7 @@ function App() {
                       {/* Version separator */}
                       <div className="sticky top-0 z-10 px-5 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-2">
                         <span className="text-[11px] font-bold text-slate-600 font-mono bg-white border border-gray-200 rounded px-2 py-0.5">
-                          v{group.version}
+                          {group.version === 'none' ? 'Events' : `v${group.version}`}
                         </span>
                         <div className="flex-1 h-px bg-gray-200"></div>
                         <span className="text-[10px] text-gray-400">
