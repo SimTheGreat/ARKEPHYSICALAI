@@ -9,6 +9,10 @@ function DefectTile({
 }) {
   const snapshotLocked = Boolean(defectStatus?.snapshot_locked);
   const qcResult = defectStatus?.qc_result;
+  const operatorDecision = defectStatus?.operator_decision;
+  const operatorChoice = operatorDecision?.choice || null;
+  const operatorResolved = operatorDecision?.status === "RESOLVED";
+  const operatorPending = operatorDecision?.status === "OPEN";
   const qcLabel = !defectEnabled
     ? "IDLE"
     : qcResult?.status
@@ -17,6 +21,17 @@ function DefectTile({
         ? "LOCKED"
         : "SEARCHING";
   const qcClass = qcLabel === "PASS" ? "pass" : qcLabel === "FAIL" ? "fail" : "neutral";
+  const operatorLabel = operatorResolved
+    ? operatorChoice
+    : operatorPending
+      ? "PENDING"
+      : "NONE";
+  const operatorClass = operatorResolved
+    ? "pass"
+    : operatorPending
+      ? "neutral"
+      : "neutral";
+  const canNotifyOperator = defectEnabled && qcResult?.status === "FAIL" && !operatorResolved;
 
   return (
     <article className="tile">
@@ -40,10 +55,17 @@ function DefectTile({
       </div>
 
       <div className={`qc-pill ${qcClass}`}>QC: {qcLabel}</div>
+      <div className={`qc-pill ${operatorClass}`} style={{ marginLeft: 6 }}>
+        OP: {operatorLabel}
+      </div>
       {defectEnabled && qcResult?.status === "FAIL" ? (
         <div className="button-row" style={{ marginTop: 4, marginBottom: 8 }}>
-          <button onClick={onNotifyOperator} disabled={notifyingOperator}>
-            {notifyingOperator ? "Notifying..." : "Notify Operator"}
+          <button onClick={onNotifyOperator} disabled={!canNotifyOperator || notifyingOperator}>
+            {operatorResolved
+              ? "Notify Operator"
+              : notifyingOperator
+                ? "Notifying..."
+                : "Notify Operator"}
           </button>
         </div>
       ) : null}
