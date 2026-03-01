@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
@@ -143,8 +143,32 @@ class VisionAutoCalibrateRequest(BaseModel):
     samples: int = 8
 
 
+class TelegramWebhookRequest(BaseModel):
+    update_id: Optional[int] = None
+    callback_query: Optional[Dict[str, Any]] = None
+    message: Optional[Dict[str, Any]] = None
+
+
 parts_state: Dict[str, PartState] = {}
 transition_events: List[TransitionEvent] = []
+qc_operator_decisions: Dict[str, Dict[str, Any]] = {}
+latest_qc_operator_decision_id: Optional[str] = None
+
+
+def _telegram_api_call(method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="TELEGRAM_BOT_TOKEN is not configured.")
+    response = requests.post(
+        f"https://api.telegram.org/bot{token}/{method}",
+        json=payload,
+        timeout=8,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not data.get("ok", False):
+        raise RuntimeError(data.get("description", f"Telegram API {method} failed"))
+    return data
 
 
 def _parse_capture_source(raw: str):
@@ -596,6 +620,7 @@ class DefectVisionRuntime:
         self.locked_annotated_frame: Optional[Any] = None
         self.locked_alignment_ok = False
         self.last_operator_notification: Optional[Dict[str, Any]] = None
+        self.last_qc_artifacts: Optional[Dict[str, str]] = None
 
     def _normalize_reference_path(self, raw_path: str) -> str:
         path = str(raw_path).strip()
@@ -844,6 +869,11 @@ class DefectVisionRuntime:
         payload["annotated_image"] = annotated_path
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+        self.last_qc_artifacts = {
+            "raw_image": raw_path,
+            "annotated_image": annotated_path,
+            "json_path": json_path,
+        }
 
     def frame(self):
         with self._lock:
@@ -936,6 +966,17 @@ class DefectVisionRuntime:
     def status(self):
         with self._lock:
             absolute_reference_path = self._absolute_reference_path()
+            current_qc_ts = self.last_qc_result.get("timestamp") if self.last_qc_result else None
+            decision_for_current_qc = None
+            if current_qc_ts:
+                matches = [
+                    item
+                    for item in qc_operator_decisions.values()
+                    if item.get("qc_result", {}).get("timestamp") == current_qc_ts
+                ]
+                if matches:
+                    matches.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+                    decision_for_current_qc = matches[0]
             return {
                 "source": self.source,
                 "width": self.width,
@@ -948,7 +989,9 @@ class DefectVisionRuntime:
                 "snapshot_locked": self.locked,
                 "qc_confirmed": self.qc_confirmed,
                 "qc_result": self.last_qc_result,
+                "operator_decision": decision_for_current_qc,
                 "last_operator_notification": self.last_operator_notification,
+                "last_qc_artifacts": self.last_qc_artifacts,
                 "contrast_gain": self.contrast_gain,
                 "saturation_gain": self.saturation_gain,
                 "comparison_method": self.comparison_method,
@@ -995,9 +1038,23 @@ class DefectVisionRuntime:
             return self.status()
 
     def notify_operator(self):
+        global latest_qc_operator_decision_id
         with self._lock:
             if not self.last_qc_result or self.last_qc_result.get("status") != "FAIL":
                 raise HTTPException(status_code=400, detail="Notify Operator is only available for QC FAIL.")
+
+            decision_id = f"qcd_{uuid4().hex[:10]}"
+            decision = {
+                "decision_id": decision_id,
+                "status": "OPEN",
+                "choice": None,
+                "created_at": utc_now_iso(),
+                "resolved_at": None,
+                "source": "DEFECT_QC",
+                "qc_result": self.last_qc_result,
+            }
+            qc_operator_decisions[decision_id] = decision
+            latest_qc_operator_decision_id = decision_id
 
             notification = {
                 "sent_at": utc_now_iso(),
@@ -1007,6 +1064,7 @@ class DefectVisionRuntime:
                     f"QC FAIL detected. defects={self.last_qc_result.get('defect_count', 0)} "
                     f"changed_ratio={self.last_qc_result.get('changed_ratio', 0):.5f}"
                 ),
+                "decision_id": decision_id,
             }
 
             token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -1016,14 +1074,53 @@ class DefectVisionRuntime:
                     text = (
                         "QC FAIL detected.\n"
                         f"defects={self.last_qc_result.get('defect_count', 0)}\n"
-                        f"changed_ratio={self.last_qc_result.get('changed_ratio', 0):.5f}"
+                        f"changed_ratio={self.last_qc_result.get('changed_ratio', 0):.5f}\n"
+                        "Choose disposition:"
                     )
-                    response = requests.post(
-                        f"https://api.telegram.org/bot{token}/sendMessage",
-                        json={"chat_id": chat_id, "text": text},
-                        timeout=8,
+                    inline_markup = {
+                        "inline_keyboard": [
+                            [{"text": "Accept", "callback_data": f"QC|{decision_id}|ACCEPT"}],
+                            [{"text": "Discard", "callback_data": f"QC|{decision_id}|DISCARD"}],
+                            [{"text": "Rework", "callback_data": f"QC|{decision_id}|REWORK"}],
+                        ]
+                    }
+
+                    # Prefer sending annotated QC image, fallback to text-only message.
+                    sent_photo = False
+                    annotated_path = (
+                        self.last_qc_artifacts.get("annotated_image")
+                        if isinstance(self.last_qc_artifacts, dict)
+                        else None
                     )
-                    response.raise_for_status()
+                    if annotated_path and os.path.exists(annotated_path):
+                        with open(annotated_path, "rb") as photo_file:
+                            photo_response = requests.post(
+                                f"https://api.telegram.org/bot{token}/sendPhoto",
+                                data={
+                                    "chat_id": chat_id,
+                                    "caption": text,
+                                    "reply_markup": json.dumps(inline_markup),
+                                },
+                                files={"photo": photo_file},
+                                timeout=12,
+                            )
+                        photo_response.raise_for_status()
+                        photo_result = photo_response.json()
+                        if photo_result.get("ok", False):
+                            sent_photo = True
+                            notification["telegram_photo_sent"] = True
+
+                    if not sent_photo:
+                        _telegram_api_call(
+                            "sendMessage",
+                            {
+                                "chat_id": chat_id,
+                                "text": text,
+                                "reply_markup": inline_markup,
+                            },
+                        )
+                        notification["telegram_photo_sent"] = False
+
                     notification["channel"] = "TELEGRAM"
                     notification["telegram_ok"] = True
                 except Exception as exc:
@@ -1038,6 +1135,7 @@ class DefectVisionRuntime:
                 "ok": True,
                 "notification": notification,
                 "qc_result": self.last_qc_result,
+                "decision": decision,
             }
 
 
@@ -1456,6 +1554,87 @@ async def update_defect_vision_settings(payload: VisionDefectSettingsUpdate):
 @app.post("/api/vision/defect/notify-operator")
 async def notify_operator_for_defect_fail():
     return defect_vision_runtime.notify_operator()
+
+
+@app.get("/api/vision/defect/operator-decision/latest")
+async def get_latest_operator_decision():
+    if latest_qc_operator_decision_id is None:
+        return {"decision": None}
+    return {"decision": qc_operator_decisions.get(latest_qc_operator_decision_id)}
+
+
+@app.get("/api/vision/defect/operator-decisions")
+async def get_operator_decisions(limit: int = 20):
+    safe_limit = min(max(limit, 1), 200)
+    ordered = sorted(
+        qc_operator_decisions.values(),
+        key=lambda item: item.get("created_at", ""),
+        reverse=True,
+    )
+    return {"count": len(ordered), "decisions": ordered[:safe_limit]}
+
+
+@app.post("/api/telegram/webhook")
+async def telegram_webhook(
+    payload: TelegramWebhookRequest,
+    x_telegram_bot_api_secret_token: Optional[str] = Header(default=None),
+):
+    secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    if secret and x_telegram_bot_api_secret_token != secret:
+        raise HTTPException(status_code=403, detail="Invalid Telegram webhook secret.")
+
+    callback_query = payload.callback_query
+    if not callback_query:
+        return {"ok": True, "handled": False}
+
+    callback_data = str(callback_query.get("data", ""))
+    if not callback_data.startswith("QC|"):
+        return {"ok": True, "handled": False}
+
+    parts = callback_data.split("|")
+    if len(parts) != 3:
+        return {"ok": True, "handled": False}
+    _, decision_id, choice = parts
+    choice = choice.upper()
+    if choice not in {"ACCEPT", "DISCARD", "REWORK"}:
+        return {"ok": True, "handled": False}
+
+    decision = qc_operator_decisions.get(decision_id)
+    if not decision:
+        return {"ok": True, "handled": False}
+
+    if decision["status"] == "OPEN":
+        decision["status"] = "RESOLVED"
+        decision["choice"] = choice
+        decision["resolved_at"] = utc_now_iso()
+        decision["operator"] = {
+            "user_id": str(callback_query.get("from", {}).get("id", "")),
+            "chat_id": str(callback_query.get("message", {}).get("chat", {}).get("id", "")),
+        }
+
+    # Best-effort acknowledgement back to Telegram.
+    try:
+        _telegram_api_call(
+            "answerCallbackQuery",
+            {
+                "callback_query_id": callback_query.get("id"),
+                "text": f"Recorded: {choice}",
+                "show_alert": False,
+            },
+        )
+        chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+        if chat_id:
+            _telegram_api_call(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": f"QC decision recorded: {choice} (id={decision_id})",
+                },
+            )
+    except Exception:
+        pass
+
+    return {"ok": True, "handled": True, "decision": decision}
 
 
 @app.get("/api/vision/defect/frame")
