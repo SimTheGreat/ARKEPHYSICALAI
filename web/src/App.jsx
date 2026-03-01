@@ -19,6 +19,26 @@ const PHASE_TO_OPERATION = {
   Pack: 'pack',
 }
 
+const MACHINE_LABELS = {
+  smt: 'SMT',
+  reflow: 'Reflow',
+  tht: 'THT',
+  aoi: 'AOI',
+  test: 'Test',
+  coating: 'Coating',
+  pack: 'Pack',
+}
+
+const PHASE_COLORS = {
+  smt:     { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+  reflow:  { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+  tht:     { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+  aoi:     { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+  test:    { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+  coating: { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+  pack:    { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+}
+
 function App() {
   const [schedule, setSchedule] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -125,6 +145,53 @@ function App() {
       })
     })
 
+    // ── Machine sub-lanes: add phase-level items ──
+    const usedOps = new Set()
+    schedule.production_plans.forEach((plan, index) => {
+      if (!plan.phases || plan.phases.length === 0) return
+      plan.phases.forEach((phase, phIdx) => {
+        const op = PHASE_TO_OPERATION[phase.name]
+        if (!op) return
+        usedOps.add(op)
+        const colors = PHASE_COLORS[op] || { bg: '#f3f4f6', border: '#9ca3af', text: '#374151' }
+        items.push({
+          id: `phase-${index}-${phIdx}`,
+          content: `<div class="phase-label"><strong>${phase.name}</strong><br/><span class="phase-detail">${plan.order_number} · ${phase.duration_minutes}m</span></div>`,
+          start: new Date(phase.starts_at),
+          end: new Date(phase.ends_at),
+          group: `machine-${op}`,
+          className: `phase-item phase-${op}`,
+          style: `background-color: ${colors.bg}; border-color: ${colors.border}; color: ${colors.text};`,
+          title: `${plan.order_number}\n${phase.name}: ${phase.duration_minutes} min\n${plan.product}`,
+        })
+      })
+    })
+
+    // Build machine sub-groups for operations that are actually used
+    const machineGroupIds = []
+    OPERATION_SEQUENCE.forEach((op, i) => {
+      if (!usedOps.has(op)) return
+      const gid = `machine-${op}`
+      machineGroupIds.push(gid)
+      const colors = PHASE_COLORS[op] || { border: '#9ca3af' }
+      groups.push({
+        id: gid,
+        content: `<span class="machine-group-label"><span class="machine-pip" style="background:${colors.border}"></span>${MACHINE_LABELS[op] || op.toUpperCase()}</span>`,
+        order: i + 1,
+      })
+    })
+
+    // Update Production Line group to nest machine sub-groups
+    if (machineGroupIds.length > 0) {
+      groups[0] = {
+        id: 'production-line',
+        content: '<strong>Production Line</strong>',
+        nestedGroups: machineGroupIds,
+        showNested: true,
+        order: 0,
+      }
+    }
+
     if (schedule.production_plans.length > 0) {
       const start = new Date(schedule.production_plans[0].starts_at)
       const end = new Date(schedule.production_plans[schedule.production_plans.length - 1].ends_at)
@@ -167,7 +234,7 @@ function App() {
           month: 'MMMM YYYY'
         }
       },
-      groupOrder: 'id'
+      groupOrder: 'order'
     }
 
     if (timelineInstance.current) {
@@ -517,7 +584,7 @@ function App() {
             </div>
             {/* Timeline container */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-              <div ref={timelineRef} className="w-full gantt-container" style={{ height: '400px' }}></div>
+              <div ref={timelineRef} className="w-full gantt-container"></div>
             </div>
           </div>
         )}
