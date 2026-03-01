@@ -112,14 +112,6 @@ function App() {
     const items = []
     const groups = [{ id: 'production-line', content: 'Production Line' }]
 
-    const conflictOrders = new Set()
-    if (schedule.conflicts && schedule.conflicts.length > 0) {
-      schedule.conflicts.forEach(conflict => {
-        conflictOrders.add(conflict.priority_first.order)
-        conflictOrders.add(conflict.edf_first.order)
-      })
-    }
-
     schedule.production_plans.forEach((plan, index) => {
       const startDate = new Date(plan.starts_at)
       const endDate = new Date(plan.ends_at)
@@ -128,14 +120,11 @@ function App() {
       const deltaDays = Math.ceil((deadline - endDate) / (1000 * 60 * 60 * 24))
       const isLate = deltaDays < 0
       const deadlineText = `Due: ${deadline.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
-      
-      const isConflict = conflictOrders.has(plan.order_number)
 
       items.push({
         id: `order-${index}`,
         content: `<div class="order-label">
           <strong>${plan.order_number}</strong>
-          ${isConflict ? '<span class="conflict-badge">⚠</span>' : ''}
           <br/><span class="order-detail">${plan.quantity}x ${plan.product}</span>
           <br/><span class="delta-due ${isLate ? 'late' : 'on-time'}">${deadlineText}</span>
         </div>`,
