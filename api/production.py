@@ -86,6 +86,64 @@ class ProductionOrderManager:
         except Exception as e:
             logger.error(f"Failed to schedule phases: {str(e)}")
             raise
+
+    def assign_phase_dates(self, production_order: Dict[str, Any], plan: 'ProductionPlan') -> None:
+        """
+        Assign concrete start/end dates to each phase based on BOM durations.
+
+        After _schedule generates the phases, their dates default to the
+        production order window.  This method walks through each phase,
+        computes the real time-window (duration_per_unit × quantity → days)
+        and calls _update_starting_date / _update_ending_date on each.
+
+        Args:
+            production_order: Result of GET /product/production/{id}
+            plan:             The ProductionPlan with starts_at & product_name
+        """
+        phases = production_order.get("phases", [])
+        if not phases:
+            logger.warning("No phases found on production order — skipping date assignment")
+            return
+
+        # Get per-phase durations from the BOM cache
+        phase_blocks = self.scheduler.get_phase_blocks(
+            plan.product_name, plan.quantity, plan.starts_at
+        )
+        if not phase_blocks:
+            logger.warning(f"No BOM phase data for {plan.product_name} — skipping date assignment")
+            return
+
+        # Match phases to blocks by sequence position (both are ordered)
+        for i, arke_phase in enumerate(phases):
+            if i >= len(phase_blocks):
+                break
+
+            block = phase_blocks[i]
+            phase_id = arke_phase.get("id")
+            phase_name = arke_phase.get("phase", {}).get("name", f"phase-{i+1}")
+
+            if not phase_id:
+                continue
+
+            try:
+                # Set start date
+                self.arke.post(
+                    f"/product/production-order-phase/{phase_id}/_update_starting_date",
+                    {"value": block["starts_at"]},
+                )
+                # Set end date
+                self.arke.post(
+                    f"/product/production-order-phase/{phase_id}/_update_ending_date",
+                    {"value": block["ends_at"]},
+                )
+                logger.info(
+                    f"  Phase {phase_name}: dates set → "
+                    f"{block['starts_at']} – {block['ends_at']} ({block['duration_minutes']} min)"
+                )
+            except Exception as phase_err:
+                logger.warning(
+                    f"  Phase {phase_name}: date assignment failed — {phase_err}"
+                )
     
     def create_full_schedule(self, production_plans: List[ProductionPlan]) -> List[Dict[str, Any]]:
         """
@@ -107,6 +165,10 @@ class ProductionOrderManager:
                 
                 # Schedule phases
                 scheduled_order = self.schedule_phases(production_order_id)
+
+                # Assign concrete per-phase dates from BOM
+                self.assign_phase_dates(scheduled_order, plan)
+
                 created_orders.append(scheduled_order)
                 
             except Exception as e:

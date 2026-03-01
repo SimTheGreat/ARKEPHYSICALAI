@@ -1487,8 +1487,11 @@ async def push_production_orders(db: Session = Depends(get_db)):
                 production_order = production_manager.create_production_order(plan)
                 arke_po_id = production_order.get("id", "")
 
-                # Step 4: Schedule phases
+                # Step 4: Schedule phases (generate from BOM)
                 scheduled = production_manager.schedule_phases(arke_po_id)
+
+                # Step 4b: Assign concrete dates to each phase
+                production_manager.assign_phase_dates(scheduled, plan)
 
                 # ── Record success ──
                 upsert_push_record(db, order_no, status="pushed",
