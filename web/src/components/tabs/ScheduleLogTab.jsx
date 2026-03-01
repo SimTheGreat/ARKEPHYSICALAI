@@ -171,6 +171,109 @@ function ConflictVisual({ conflict, plans }) {
 }
 
 /* ───────────────────────────────────────────────
+   Collapsible schedule summary card
+   ─────────────────────────────────────────────── */
+function ScheduleSummaryCard({ detail }) {
+  const [open, setOpen] = useState(false)
+
+  let parsed = null
+  try { parsed = typeof detail === 'string' ? JSON.parse(detail) : detail } catch { return null }
+  if (!parsed) return null
+
+  const { changes = [], conflicts = [], schedule: rows = [] } = parsed
+
+  return (
+    <div className="mt-2">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1.5 text-[11px] font-medium text-blue-600 hover:text-blue-800 transition group"
+      >
+        <svg
+          className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-90' : ''}`}
+          fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+        </svg>
+        {open ? 'Hide' : 'View'} full schedule summary
+      </button>
+
+      {open && (
+        <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50/50 overflow-hidden text-[12px]">
+          {/* Changes */}
+          {changes.length > 0 && (
+            <div className="px-4 py-3 border-b border-gray-200">
+              <h4 className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-2">Changes</h4>
+              <ul className="space-y-1">
+                {changes.map((c, i) => (
+                  <li key={i} className="flex items-start gap-2 text-gray-700">
+                    <span className="w-1 h-1 rounded-full bg-violet-400 mt-1.5 flex-shrink-0"></span>
+                    {c}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Conflicts */}
+          {conflicts.length > 0 && (
+            <div className="px-4 py-3 border-b border-gray-200 bg-amber-50/40">
+              <h4 className="text-[10px] font-bold uppercase tracking-wider text-amber-600 mb-2">Conflicts &amp; Resolutions</h4>
+              <ul className="space-y-1.5">
+                {conflicts.map((c, i) => (
+                  <li key={i} className="text-gray-700 leading-relaxed">
+                    <span className="font-medium text-amber-700">{c.priority_order} vs {c.edf_order}:</span>{' '}
+                    {c.resolution}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Full schedule table */}
+          <div className="px-4 py-3">
+            <h4 className="text-[10px] font-bold uppercase tracking-wider text-gray-500 mb-2">Production Schedule (EDF)</h4>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="border-b border-gray-200 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
+                    <th className="pb-1.5 pr-3">#</th>
+                    <th className="pb-1.5 pr-3">Order</th>
+                    <th className="pb-1.5 pr-3">Customer</th>
+                    <th className="pb-1.5 pr-3">Product</th>
+                    <th className="pb-1.5 pr-3">Qty</th>
+                    <th className="pb-1.5 pr-3">P</th>
+                    <th className="pb-1.5 pr-3">Start</th>
+                    <th className="pb-1.5 pr-3">End</th>
+                    <th className="pb-1.5">Deadline</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {rows.map(r => (
+                    <tr key={r.pos} className="text-gray-700">
+                      <td className="py-1.5 pr-3 text-gray-400 font-mono">{r.pos}</td>
+                      <td className="py-1.5 pr-3 font-semibold">{r.order}</td>
+                      <td className="py-1.5 pr-3">{r.customer}</td>
+                      <td className="py-1.5 pr-3">{r.product}</td>
+                      <td className="py-1.5 pr-3 font-mono">{r.qty}</td>
+                      <td className="py-1.5 pr-3">
+                        <span className={`${priorityBadge(r.priority)} text-white text-[9px] font-bold px-1 py-0.5 rounded`}>P{r.priority}</span>
+                      </td>
+                      <td className="py-1.5 pr-3 font-mono text-[11px]">{r.starts}</td>
+                      <td className="py-1.5 pr-3 font-mono text-[11px]">{r.ends}</td>
+                      <td className="py-1.5 font-mono text-[11px]">{r.deadline}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ───────────────────────────────────────────────
    Main component
    ─────────────────────────────────────────────── */
 export default function ScheduleLogTab({ schedule, productionLog, onRefresh }) {
@@ -178,7 +281,7 @@ export default function ScheduleLogTab({ schedule, productionLog, onRefresh }) {
 
   const filteredLog = logFilter === 'all'
     ? productionLog
-    : productionLog.filter(e => e.category === 'schedule' || e.category === 'conflict')
+    : productionLog.filter(e => e.category === 'schedule' || e.category === 'conflict' || e.category === 'summary')
 
   // Build a lookup: edf_first order_number → conflict object for fast matching
   const conflictByEdfOrder = {}
@@ -290,7 +393,12 @@ export default function ScheduleLogTab({ schedule, productionLog, onRefresh }) {
                       change:  { dot: 'bg-violet-500', badge: 'bg-violet-50 text-violet-600 ring-violet-500/20' },
                       error:   { dot: 'bg-red-500', badge: 'bg-red-50 text-red-600 ring-red-500/20' },
                     }
-                    const cfg = levelConfig[entry.level] || levelConfig.info
+                    // Summary entries get a teal dot to stand out
+                    const isSummary = entry.category === 'summary'
+                    const cfg = isSummary
+                      ? { dot: 'bg-teal-500', badge: 'bg-teal-50 text-teal-700 ring-teal-500/20' }
+                      : (levelConfig[entry.level] || levelConfig.info)
+                    const badgeLabel = isSummary ? 'summary' : entry.level
 
                     // Resolve conflict data for conflict entries
                     const isConflict = entry.category === 'conflict'
@@ -308,7 +416,7 @@ export default function ScheduleLogTab({ schedule, productionLog, onRefresh }) {
                             <div className="flex items-center gap-2">
                               <span className="font-medium text-[13px] text-gray-900">{entry.title}</span>
                               <span className={`text-[10px] font-semibold rounded-md px-1.5 py-0.5 ring-1 ring-inset ${cfg.badge}`}>
-                                {entry.level}
+                                {badgeLabel}
                               </span>
                               {entry.order_number && (
                                 <span className="text-[11px] font-mono font-medium text-gray-400 bg-gray-100 rounded px-1.5 py-0.5">
@@ -321,7 +429,7 @@ export default function ScheduleLogTab({ schedule, productionLog, onRefresh }) {
                                 </span>
                               )}
                             </div>
-                            {entry.detail && (
+                            {entry.detail && !isSummary && (
                               <p className="text-xs text-gray-500 mt-1 leading-relaxed">{entry.detail}</p>
                             )}
                             {/* Collapsible conflict visual */}
@@ -330,6 +438,10 @@ export default function ScheduleLogTab({ schedule, productionLog, onRefresh }) {
                                 conflict={matchedConflict}
                                 plans={schedule?.production_plans}
                               />
+                            )}
+                            {/* Collapsible schedule summary */}
+                            {entry.category === 'summary' && entry.detail && (
+                              <ScheduleSummaryCard detail={entry.detail} />
                             )}
                           </div>
                           {/* Timestamp */}

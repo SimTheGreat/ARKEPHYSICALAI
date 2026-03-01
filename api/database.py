@@ -238,11 +238,13 @@ def save_schedule(db: Session, plans: list, conflicts: list) -> int:
         ))
 
     # ── Diff & log ──
+    change_lines = []  # collect change descriptions for the summary
     if old_version == 0:
         # First schedule ever
         _add_log(db, "info", "schedule", "Schedule created",
                  f"Initial schedule with {len(plans)} orders (v{new_version})",
                  schedule_version=new_version)
+        change_lines.append(f"Initial schedule with {len(plans)} orders")
         # Log conflicts once for the initial schedule
         for c in conflicts:
             _add_log(db, "warning", "conflict", "EDF vs Priority conflict",
@@ -250,9 +252,12 @@ def save_schedule(db: Session, plans: list, conflicts: list) -> int:
                      order_number=c.get("edf_first", {}).get("order"),
                      schedule_version=new_version)
     else:
-        _diff_schedules(db, old_by_order, old_order_list, plans, new_order_list, new_version)
+        change_lines = _diff_schedules(db, old_by_order, old_order_list, plans, new_order_list, new_version)
         # Only log *new* conflicts that weren't present in the previous version
         _log_new_conflicts(db, conflicts, old_version, new_version)
+
+    # ── Consolidated schedule summary (one entry at the end) ──
+    _emit_schedule_summary(db, plans, conflicts, change_lines, new_version)
 
     db.commit()
     logger.info(f"Saved schedule v{new_version} with {len(plans)} entries")
@@ -304,22 +309,28 @@ def _log_new_conflicts(db, conflicts, old_version, new_version):
 
 
 def _diff_schedules(db, old_by_order, old_order_list, new_plans, new_order_list, version):
-    """Compare old ↔ new schedule and write change log entries."""
+    """Compare old ↔ new schedule and write change log entries.
+    Returns a list of human-readable change description strings."""
     new_by_order = {p["order_number"]: p for p in new_plans}
+    changes = []
 
     # Orders added
     for on in new_order_list:
         if on not in old_by_order:
+            msg = f"Order {on} added at position #{new_order_list.index(on) + 1}"
             _add_log(db, "change", "schedule", f"Order {on} added to schedule",
                      f"New order appeared in schedule at position {new_order_list.index(on) + 1}",
                      order_number=on, schedule_version=version)
+            changes.append(msg)
 
     # Orders removed
     for on in old_order_list:
         if on not in new_by_order:
+            msg = f"Order {on} removed from schedule"
             _add_log(db, "change", "schedule", f"Order {on} removed from schedule",
                      f"Order no longer present in new schedule",
                      order_number=on, schedule_version=version)
+            changes.append(msg)
 
     # Position changes & priority changes
     for idx, p in enumerate(new_plans):
@@ -330,18 +341,22 @@ def _diff_schedules(db, old_by_order, old_order_list, new_plans, new_order_list,
             new_pos = idx + 1
             if old_pos != new_pos:
                 direction = "up" if new_pos < old_pos else "down"
+                msg = f"{on} moved {direction}: #{old_pos} → #{new_pos}"
                 _add_log(db, "change", "schedule",
                          f"Order {on} moved {direction}",
                          f"Position changed from #{old_pos} to #{new_pos}",
                          order_number=on, schedule_version=version)
+                changes.append(msg)
 
             old_prio = old.priority
             new_prio = p.get("priority")
             if old_prio is not None and new_prio is not None and old_prio != new_prio:
+                msg = f"{on} priority P{old_prio} → P{new_prio}"
                 _add_log(db, "change", "schedule",
                          f"Order {on} priority changed",
                          f"Priority changed from P{old_prio} to P{new_prio}",
                          order_number=on, schedule_version=version)
+                changes.append(msg)
 
     # Detect swaps (adjacent pair that swapped)
     for i in range(len(old_order_list) - 1):
@@ -350,10 +365,75 @@ def _diff_schedules(db, old_by_order, old_order_list, new_plans, new_order_list,
             new_a = new_order_list.index(a)
             new_b = new_order_list.index(b)
             if new_b < new_a:  # b now comes before a = swap
+                msg = f"{b} and {a} swapped positions"
                 _add_log(db, "change", "schedule",
                          f"Orders {b} and {a} swapped",
                          f"{b} (was #{i+2}) now scheduled before {a} (was #{i+1})",
                          schedule_version=version)
+                changes.append(msg)
+
+    return changes
+
+
+def _emit_schedule_summary(db, plans, conflicts, change_lines, version):
+    """Write a single consolidated summary log entry after all diffs.
+
+    The ``detail`` field is a JSON string so the frontend can render it
+    as a rich collapsible card.  Structure::
+
+        {
+            "changes": ["Order SO-001 added …", …],
+            "conflicts": [{"resolution": "…", "edf_order": "…", "priority_order": "…"}, …],
+            "schedule": [{"pos": 1, "order": "SO-001", …}, …]
+        }
+    """
+    import json as _json
+
+    schedule_rows = []
+    for idx, p in enumerate(plans, start=1):
+        starts = p.get("starts_at", "")
+        ends = p.get("ends_at", "")
+        deadline = p.get("deadline", "")
+        # Trim to date+time for readability
+        fmt = lambda s: s[:16].replace("T", " ") if isinstance(s, str) and "T" in s else s
+        schedule_rows.append({
+            "pos": idx,
+            "order": p["order_number"],
+            "customer": p.get("customer", ""),
+            "product": p.get("product", ""),
+            "qty": p.get("quantity"),
+            "priority": p.get("priority"),
+            "starts": fmt(starts),
+            "ends": fmt(ends),
+            "deadline": fmt(deadline),
+            "reasoning": p.get("reasoning", ""),
+        })
+
+    conflict_rows = []
+    for c in conflicts:
+        conflict_rows.append({
+            "resolution": c.get("resolution", ""),
+            "edf_order": c.get("edf_first", {}).get("order", ""),
+            "priority_order": c.get("priority_first", {}).get("order", ""),
+        })
+
+    detail_obj = {
+        "changes": change_lines,
+        "conflicts": conflict_rows,
+        "schedule": schedule_rows,
+    }
+
+    n_changes = len(change_lines)
+    n_conflicts = len(conflict_rows)
+    title = f"Schedule summary — {len(plans)} orders"
+    if n_changes:
+        title += f", {n_changes} change{'s' if n_changes != 1 else ''}"
+    if n_conflicts:
+        title += f", {n_conflicts} conflict{'s' if n_conflicts != 1 else ''}"
+
+    _add_log(db, "info", "summary", title,
+             detail=_json.dumps(detail_obj),
+             schedule_version=version)
 
 
 def _add_log(db, level, category, title, detail=None, order_number=None, schedule_version=None):
