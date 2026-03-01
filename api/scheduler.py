@@ -216,7 +216,7 @@ class ProductionScheduler:
                 product_name=order.product_name,
                 quantity=order.quantity,
                 starts_at=current_start,
-                ends_at=min(ends_at, order.deadline),  # Target the deadline
+                ends_at=ends_at,
                 deadline=order.deadline,
                 priority=order.priority,
                 customer=order.customer,

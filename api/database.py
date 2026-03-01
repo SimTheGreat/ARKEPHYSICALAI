@@ -325,11 +325,10 @@ def get_production_logs(db: Session, limit: int = 100) -> list:
 
 
 def init_db():
-    """Initialize database tables - drops and recreates to apply schema changes"""
+    """Initialize database tables (additive — never drops existing data)"""
     try:
-        Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
-        logger.info("Database tables recreated successfully")
+        logger.info("Database tables initialised (create-if-not-exists)")
     except Exception as e:
         logger.error(f"Failed to create database tables: {e}")
         raise
