@@ -430,10 +430,27 @@ def _emit_schedule_summary(db, plans, conflicts, change_lines, version):
             "priority_order": c.get("priority_first", {}).get("order", ""),
         })
 
+    # Build EDF reasoning narrative for the highest-priority order
+    edf_reasoning = ""
+    if schedule_rows:
+        hp = min(schedule_rows, key=lambda r: r["priority"] or 99)
+        hp_pos = hp["pos"]
+        if hp_pos > 1:
+            before = [r for r in schedule_rows if r["pos"] < hp_pos]
+            edf_reasoning = (
+                f"{hp['order']} ({hp['product']}, P{hp['priority']}) is the "
+                f"highest-priority order but is scheduled at position #{hp_pos}. "
+                f"{len(before)} order(s) have earlier deadlines and are scheduled first: "
+                + ", ".join(f"{r['order']} (deadline {r['deadline']})" for r in before)
+                + ". EDF prioritises tighter deadlines over priority, ensuring no earlier "
+                f"deadline is missed. {met_text}"
+            )
+
     detail_obj = {
         "changes": change_lines,
         "conflicts": conflict_rows,
         "schedule": schedule_rows,
+        "edf_reasoning": edf_reasoning,
     }
 
     n_changes = len(change_lines)

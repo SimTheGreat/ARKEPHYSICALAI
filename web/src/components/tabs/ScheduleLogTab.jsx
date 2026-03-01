@@ -180,7 +180,7 @@ function ScheduleSummaryCard({ detail }) {
   try { parsed = typeof detail === 'string' ? JSON.parse(detail) : detail } catch { return null }
   if (!parsed) return null
 
-  const { changes = [], conflicts = [], schedule: rows = [] } = parsed
+  const { changes = [], conflicts = [], schedule: rows = [], edf_reasoning = '' } = parsed
 
   return (
     <div className="mt-2">
@@ -211,6 +211,14 @@ function ScheduleSummaryCard({ detail }) {
                   </li>
                 ))}
               </ul>
+            </div>
+          )}
+
+          {/* EDF Reasoning */}
+          {edf_reasoning && (
+            <div className="px-4 py-3 border-b border-gray-200 bg-blue-50/40">
+              <h4 className="text-[10px] font-bold uppercase tracking-wider text-blue-600 mb-2">📌 EDF Reasoning</h4>
+              <p className="text-gray-700 leading-relaxed">{edf_reasoning}</p>
             </div>
           )}
 

@@ -1838,6 +1838,24 @@ async def send_schedule_to_telegram(db: Session = Depends(get_db)):
         for c in conflicts:
             lines.append(f"• {c['resolution']}")
 
+    # EDF reasoning for highest-priority order
+    hp = min(plans, key=lambda p: p.priority)
+    hp_pos = next(i for i, p in enumerate(plans, 1) if p is hp)
+    if hp_pos > 1:
+        before = plans[:hp_pos - 1]
+        lines.append(
+            f"\n📌 *EDF Reasoning:* `{hp.sales_order_number}` ({hp.product_name}, P{hp.priority}) "
+            f"is the highest-priority order but is at position #{hp_pos}. "
+            f"{hp_pos - 1} order(s) have earlier deadlines:"
+        )
+        for b in before:
+            lines.append(f"  • `{b.sales_order_number}` — deadline {b.deadline.strftime('%b %-d')}")
+        all_met = all(p.ends_at <= p.deadline for p in plans)
+        lines.append(
+            "All deadlines are met." if all_met
+            else "⚠️ Some deadlines cannot be met."
+        )
+
     text = "\n".join(lines)
 
     approval_id = f"SCHED-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
