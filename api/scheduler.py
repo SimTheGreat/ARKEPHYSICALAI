@@ -62,40 +62,81 @@ class ProductionScheduler:
     def __init__(self, arke_client, policy: SchedulingPolicy = SchedulingPolicy.EDF):
         self.policy = policy
         self.arke = arke_client
-        self.product_bom_cache = {}
+        self.product_bom_cache = {}          # product_name → total min/unit
+        self.product_phases_cache = {}       # product_name → [{name, duration_per_unit}]
+        self.product_id_map = {}             # extra_id / internal_id / name → UUID
     
     def load_product_bom_data(self) -> Dict[str, float]:
-        """Fetch product BOM data from Arke API"""
+        """Fetch product BOM data from Arke API.
+
+        The list endpoint (/product/product) does NOT include the BOM plan.
+        We must call the detail endpoint (/product/product/{id}) for each
+        product to get plan[].processes[].properties.{name, duration}.
+        """
         try:
             products = self.arke.get("/product/product")
             bom_data = {}
-            
+
             for product in products:
                 product_name = product.get("name", "")
-                plan = product.get("plan", {})
-                
-                # Handle different plan structures
+                product_uuid = product.get("id", "")
+                internal_id = product.get("internal_id", "")
+                extra_id = product.get("extra_id", "")
+
+                # Build internal_id/extra_id → UUID lookup
+                if product_uuid:
+                    if internal_id:
+                        self.product_id_map[internal_id] = product_uuid
+                    if extra_id:
+                        self.product_id_map[extra_id] = product_uuid
+                    if product_name:
+                        self.product_id_map[product_name] = product_uuid
+                    logger.info(f"Product map: {internal_id or extra_id} → {product_uuid}")
+
+                # ── Fetch detail to get BOM plan ──
                 total_minutes = 0
-                if isinstance(plan, dict):
-                    phases = plan.get("phases", [])
-                    if isinstance(phases, list):
-                        for phase in phases:
-                            if isinstance(phase, dict):
-                                total_minutes += phase.get("duration_per_unit", 0)
-                    # Also try direct duration field
-                    elif plan.get("total_duration"):
-                        total_minutes = plan["total_duration"]
-                
+                phase_list: List[Dict[str, Any]] = []
+                if product_uuid:
+                    try:
+                        detail = self.arke.get(f"/product/product/{product_uuid}")
+                        plan = detail.get("plan", [])
+                        # plan is a list of step objects:
+                        #   [{"operator":"and", "processes":[{"properties":{"name":"SMT","duration":24}}]}]
+                        if isinstance(plan, list):
+                            for step in plan:
+                                for proc in (step.get("processes") or []):
+                                    props = proc.get("properties", {})
+                                    dur = props.get("duration", 0)
+                                    name = props.get("name", "Unknown")
+                                    total_minutes += dur
+                                    phase_list.append({
+                                        "name": name,
+                                        "duration_per_unit": dur,
+                                    })
+                    except Exception as detail_err:
+                        logger.warning(f"Could not fetch detail for {product_name}: {detail_err}")
+
                 if total_minutes == 0:
                     logger.warning(f"No BOM data found for {product_name}, using 0 min/unit")
                 else:
-                    logger.info(f"Loaded BOM for {product_name}: {total_minutes} min/unit")
-                
+                    logger.info(f"Loaded BOM for {product_name}: {total_minutes} min/unit, {len(phase_list)} phases")
+
                 bom_data[product_name] = total_minutes
-            
+                # Also key by internal_id / extra_id for lookup flexibility
+                if internal_id:
+                    bom_data[internal_id] = total_minutes
+                if extra_id:
+                    bom_data[extra_id] = total_minutes
+                if phase_list:
+                    self.product_phases_cache[product_name] = phase_list
+                    if internal_id:
+                        self.product_phases_cache[internal_id] = phase_list
+                    if extra_id:
+                        self.product_phases_cache[extra_id] = phase_list
+
             self.product_bom_cache = bom_data
             return bom_data
-            
+
         except Exception as e:
             logger.error(f"Failed to load product BOM data: {e}")
             raise
@@ -134,11 +175,26 @@ class ProductionScheduler:
                     if not product_name or quantity == 0:
                         continue
                     
+                    # Try multiple field names for the product code
+                    raw_pid = (product_item.get("extra_id")
+                               or product_item.get("internal_id")
+                               or product_item.get("product_id")
+                               or product_item.get("id")
+                               or "")
+                    # Resolve to real UUID via product map
+                    if not self.product_id_map:
+                        self.load_product_bom_data()
+                    pid = self.product_id_map.get(raw_pid, raw_pid)
+                    # If still not a UUID, try by product name
+                    if len(pid) < 32 and product_name in self.product_id_map:
+                        pid = self.product_id_map[product_name]
+                    logger.info(f"Product '{product_name}': raw={raw_pid} → uuid={pid}")
+                    
                     sales_orders.append(SalesOrder(
                         id=order_id,
                         order_number=order_number,
                         customer=customer,
-                        product_id=product_item.get("extra_id", ""),
+                        product_id=pid,
                         product_name=product_name,
                         quantity=quantity,
                         deadline=deadline,
@@ -171,7 +227,31 @@ class ProductionScheduler:
         except Exception as e:
             logger.warning(f"Failed to parse datetime {dt_string}: {e}")
             return self.CURRENT_DATE + timedelta(days=30)
-    
+
+    def get_phase_blocks(self, product_name: str, quantity: int, order_start: datetime) -> List[Dict[str, Any]]:
+        """Break an order into per-phase time blocks for Gantt machine rows."""
+        if not self.product_phases_cache:
+            self.load_product_bom_data()
+
+        phases = self.product_phases_cache.get(product_name, [])
+        if not phases:
+            return []
+
+        blocks: List[Dict[str, Any]] = []
+        cursor = order_start
+        for phase in phases:
+            dur_minutes = phase["duration_per_unit"] * quantity
+            dur_days = dur_minutes / self.WORKING_MINUTES_PER_DAY
+            phase_end = cursor + timedelta(days=dur_days)
+            blocks.append({
+                "name": phase["name"],
+                "starts_at": cursor.isoformat(),
+                "ends_at": phase_end.isoformat(),
+                "duration_minutes": round(dur_minutes, 1),
+            })
+            cursor = phase_end
+        return blocks
+
     def calculate_production_time(self, product_name: str, quantity: int) -> tuple:
         """
         Calculate production time in working days and total minutes
@@ -216,7 +296,7 @@ class ProductionScheduler:
                 product_name=order.product_name,
                 quantity=order.quantity,
                 starts_at=current_start,
-                ends_at=min(ends_at, order.deadline),  # Target the deadline
+                ends_at=ends_at,
                 deadline=order.deadline,
                 priority=order.priority,
                 customer=order.customer,

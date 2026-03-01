@@ -34,8 +34,8 @@ class ProductionOrderManager:
             payload = {
                 "product_id": plan.product_id,
                 "quantity": plan.quantity,
-                "starts_at": plan.starts_at.isoformat(),
-                "ends_at": plan.ends_at.isoformat()
+                "starts_at": plan.starts_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "ends_at": plan.ends_at.strftime("%Y-%m-%dT%H:%M:%SZ")
             }
             
             logger.info(f"Creating production order for {plan.sales_order_number}: {payload}")
@@ -50,74 +50,39 @@ class ProductionOrderManager:
     
     def schedule_phases(self, production_order_id: str) -> Dict[str, Any]:
         """
-        Schedule phases for a production order
-        
-        1. Call _schedule to generate phase sequence from BOM
-        2. Assign concrete start/end dates to each phase
-        
+        Schedule phases for a production order.
+
+        Calls _schedule which tells Arke to generate the phase sequence
+        from the product BOM and automatically assign phase dates within
+        the production order's starts_at / ends_at window.
+
         Args:
             production_order_id: ID of the production order
-            
+
         Returns:
-            Scheduled phases data
+            Production order data with scheduled phases
         """
         try:
             logger.info(f"Scheduling phases for production order {production_order_id}")
-            
-            # Step 1: Generate phase sequence from BOM
+
+            # Arke generates phases + dates from the product BOM
             self.arke.post(f"/product/production/{production_order_id}/_schedule")
-            
-            # Step 2: Get the production order with phases
+
+            # Fetch the result so we can log / return it
             production_order = self.arke.get(f"/product/production/{production_order_id}")
-            
+
             phases = production_order.get("phases", [])
-            if not phases:
-                logger.warning("No phases found after scheduling")
-                return production_order
-            
-            # Step 3: Assign start/end dates to each phase
-            # Phases are sequential - each starts when previous ends
-            starts_at_str = production_order.get("starts_at", "")
-            if starts_at_str:
-                current_start = datetime.fromisoformat(starts_at_str.replace("Z", "+00:00"))
-                # Ensure timezone awareness
-                if current_start.tzinfo is None:
-                    current_start = current_start.replace(tzinfo=timezone.utc)
-            else:
-                current_start = self.scheduler.CURRENT_DATE
-            
             for i, phase in enumerate(phases):
-                phase_id = phase["id"]
-                
-                # Calculate phase duration
-                duration_per_unit = phase.get("duration_per_unit", 10)  # minutes
-                quantity = production_order["quantity"]
-                total_minutes = duration_per_unit * quantity
-                duration_days = total_minutes / self.scheduler.WORKING_MINUTES_PER_DAY
-                
-                phase_end = current_start + timedelta(days=duration_days)
-                
-                # Update phase start date
-                self.arke.post(
-                    f"/product/production-order-phase/{phase_id}/_update_starting_date",
-                    {"starting_date": current_start.isoformat()}
+                phase_name = phase.get("phase", {}).get("name", f"phase-{i+1}")
+                logger.info(
+                    f"Phase {i+1} ({phase_name}): "
+                    f"{phase.get('starts_at', '?')} → {phase.get('ends_at', '?')} "
+                    f"[{phase.get('status', '?')}]"
                 )
-                
-                # Update phase end date
-                self.arke.post(
-                    f"/product/production-order-phase/{phase_id}/_update_ending_date",
-                    {"ending_date": phase_end.isoformat()}
-                )
-                
-                logger.info(f"Phase {i+1} ({phase.get('name', 'unknown')}): {current_start.strftime('%b %d')} → {phase_end.strftime('%b %d')}")
-                
-                # Next phase starts when this one ends
-                current_start = phase_end
-            
-            # Get updated production order
-            updated_order = self.arke.get(f"/product/production/{production_order_id}")
-            return updated_order
-            
+
+            logger.info(f"Scheduled {len(phases)} phases for PO {production_order_id}")
+            return production_order
+
         except Exception as e:
             logger.error(f"Failed to schedule phases: {str(e)}")
             raise

@@ -2,16 +2,41 @@ import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import LiveViewDashboard from './live/LiveViewDashboard'
 import LiveViewInlineSection from './live/LiveViewInlineSection'
+import ScheduleLogTab from './components/tabs/ScheduleLogTab'
 
 const OPERATION_SEQUENCE = ['smt', 'reflow', 'tht', 'aoi', 'test', 'coating', 'pack']
 const PHASE_TO_OPERATION = {
   SMT: 'smt',
+  REFLOW: 'reflow',
   Reflow: 'reflow',
   THT: 'tht',
   AOI: 'aoi',
+  TEST: 'test',
   Test: 'test',
+  COATING: 'coating',
   Coating: 'coating',
+  PACK: 'pack',
   Pack: 'pack',
+}
+
+const MACHINE_LABELS = {
+  smt: 'SMT',
+  reflow: 'Reflow',
+  tht: 'THT',
+  aoi: 'AOI',
+  test: 'Test',
+  coating: 'Coating',
+  pack: 'Pack',
+}
+
+const PHASE_COLORS = {
+  smt:     { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+  reflow:  { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+  tht:     { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+  aoi:     { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+  test:    { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+  coating: { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
+  pack:    { bg: '#f7f8fa', border: '#aebdcf', text: '#647b97' },
 }
 
 function App() {
@@ -22,6 +47,9 @@ function App() {
   const [productionStates, setProductionStates] = useState([])
   const [loadingStates, setLoadingStates] = useState(false)
   const [lineVisionPhase, setLineVisionPhase] = useState('NOT_PRESENT')
+  const [productionLog, setProductionLog] = useState([])
+  const [pushStatus, setPushStatus] = useState({})
+  const [pushing, setPushing] = useState(false)
   const timelineRef = useRef(null)
   const timelineInstance = useRef(null)
   const autoAdvanceRef = useRef({
@@ -34,7 +62,41 @@ function App() {
   useEffect(() => {
     fetchSchedule()
     fetchProductionStates()
+    fetchProductionLog()
+    fetchPushStatus()
   }, [])
+
+  // Fetch push status for all orders
+  const fetchPushStatus = async () => {
+    try {
+      const response = await axios.get('/api/production/push-status')
+      const map = {}
+      for (const r of response.data) {
+        map[r.order_number] = r
+      }
+      setPushStatus(map)
+    } catch (err) {
+      console.error('Failed to fetch push status', err)
+    }
+  }
+
+  // Push all orders to Arke
+  const pushToArke = async () => {
+    setPushing(true)
+    try {
+      const response = await axios.post('/api/production/push')
+      // Refresh push status + log
+      await fetchPushStatus()
+      await fetchProductionLog()
+      const { created, skipped, failed } = response.data
+      alert(`Push complete: ${created} created, ${skipped} already pushed, ${failed} failed`)
+    } catch (err) {
+      console.error('Push to Arke failed', err)
+      alert('Push to Arke failed: ' + (err.response?.data?.detail || err.message))
+    } finally {
+      setPushing(false)
+    }
+  }
 
   useEffect(() => {
     if (schedule && activeTab === 'gantt' && timelineRef.current && window.vis) {
@@ -83,6 +145,53 @@ function App() {
       })
     })
 
+    // ── Machine sub-lanes: add phase-level items ──
+    const usedOps = new Set()
+    schedule.production_plans.forEach((plan, index) => {
+      if (!plan.phases || plan.phases.length === 0) return
+      plan.phases.forEach((phase, phIdx) => {
+        const op = PHASE_TO_OPERATION[phase.name]
+        if (!op) return
+        usedOps.add(op)
+        const colors = PHASE_COLORS[op] || { bg: '#f3f4f6', border: '#9ca3af', text: '#374151' }
+        items.push({
+          id: `phase-${index}-${phIdx}`,
+          content: `<div class="phase-label"><strong>${phase.name}</strong><br/><span class="phase-detail">${plan.order_number} · ${phase.duration_minutes}m</span></div>`,
+          start: new Date(phase.starts_at),
+          end: new Date(phase.ends_at),
+          group: `machine-${op}`,
+          className: `phase-item phase-${op}`,
+          style: `background-color: ${colors.bg}; border-color: ${colors.border}; color: ${colors.text};`,
+          title: `${plan.order_number}\n${phase.name}: ${phase.duration_minutes} min\n${plan.product}`,
+        })
+      })
+    })
+
+    // Build machine sub-groups for operations that are actually used
+    const machineGroupIds = []
+    OPERATION_SEQUENCE.forEach((op, i) => {
+      if (!usedOps.has(op)) return
+      const gid = `machine-${op}`
+      machineGroupIds.push(gid)
+      const colors = PHASE_COLORS[op] || { border: '#9ca3af' }
+      groups.push({
+        id: gid,
+        content: `<span class="machine-group-label"><span class="machine-pip" style="background:${colors.border}"></span>${MACHINE_LABELS[op] || op.toUpperCase()}</span>`,
+        order: i + 1,
+      })
+    })
+
+    // Update Production Line group to nest machine sub-groups
+    if (machineGroupIds.length > 0) {
+      groups[0] = {
+        id: 'production-line',
+        content: '<strong>Production Line</strong>',
+        nestedGroups: machineGroupIds,
+        showNested: true,
+        order: 0,
+      }
+    }
+
     if (schedule.production_plans.length > 0) {
       const start = new Date(schedule.production_plans[0].starts_at)
       const end = new Date(schedule.production_plans[schedule.production_plans.length - 1].ends_at)
@@ -125,7 +234,7 @@ function App() {
           month: 'MMMM YYYY'
         }
       },
-      groupOrder: 'id'
+      groupOrder: 'order'
     }
 
     if (timelineInstance.current) {
@@ -146,12 +255,24 @@ function App() {
       const response = await axios.get('http://localhost:8000/api/scheduler/schedule')
       setSchedule(response.data)
       setError(null)
+      // Refresh log after schedule recalculation (new version may have been created)
+      fetchProductionLog()
     } catch (err) {
       setError(err.message)
     } finally {
       setLoading(false)
     }
   }
+
+  const fetchProductionLog = async () => {
+    try {
+      const response = await axios.get('http://localhost:8000/api/production-log')
+      setProductionLog(response.data || [])
+    } catch (err) {
+      console.error('Failed to fetch production log:', err)
+    }
+  }
+
   const fetchProductionStates = async () => {
     try {
       setLoadingStates(true)
@@ -403,21 +524,6 @@ function App() {
               Schedule Log
             </button>
             <button
-              onClick={() => setActiveTab('conflicts')}
-              className={`${
-                activeTab === 'conflicts'
-                  ? 'border-blue-500 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-              } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition`}
-            >
-              Conflicts
-              {schedule?.conflicts?.length > 0 && (
-                <span className="ml-2 bg-red-100 text-red-600 py-0.5 px-2 rounded-full text-xs">
-                  {schedule.conflicts.length}
-                </span>
-              )}
-            </button>
-            <button
               onClick={() => setActiveTab('live-view')}
               className={`${
                 activeTab === 'live-view'
@@ -435,42 +541,114 @@ function App() {
       <div className="w-full px-2 sm:px-3 lg:px-4 py-6">
         {activeTab === 'gantt' && (
           <div className="space-y-4">
-            <div className="bg-white rounded-lg shadow p-6">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Production Timeline - Single Line Sequential Processing</h2>
-              <div ref={timelineRef} className="w-full" style={{ height: '400px' }}></div>
+            {/* Header */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-slate-800 flex items-center justify-center">
+                  <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h7" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-base font-semibold text-gray-900">Production Gantt</h2>
+                  <p className="text-xs text-gray-400">Single-line sequential processing timeline</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-500 bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-[#fef2f2] border border-[#f87171]"></span>
+                  P1
+                </span>
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-500 bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-[#fff7ed] border border-[#fb923c]"></span>
+                  P2
+                </span>
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-500 bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-[#ecfdf5] border border-[#34d399]"></span>
+                  P3/P4
+                </span>
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-500 bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1">
+                  <span className="w-2.5 h-2.5 rounded-sm border border-red-300" style={{background:'repeating-linear-gradient(45deg,#fef2f2,#fef2f2 3px,#fecaca 3px,#fecaca 6px)'}}></span>
+                  Late
+                </span>
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-500 bg-gray-50 border border-gray-200 rounded-md px-2.5 py-1">
+                  <span className="w-0.5 h-3 bg-red-500 rounded-full"></span>
+                  Now
+                </span>
+                {schedule?.production_plans?.length > 0 && (
+                  <span className="text-[11px] font-medium text-gray-400 bg-gray-50 rounded-md px-2.5 py-1">
+                    {schedule.production_plans.length} orders
+                  </span>
+                )}
+              </div>
             </div>
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <p className="text-sm text-blue-800">
-                <strong>Timeline View:</strong> Production orders run sequentially on a single production line. 
-                Day boundaries shown with vertical lines (480 min/day working time). 
-                Hatched red bars show orders running late. Delta shows days until/past deadline.
-                ⚠ indicates SO-003/SO-017 EDF vs Priority conflict.
-              </p>
+            {/* Timeline container */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+              <div ref={timelineRef} className="w-full gantt-container"></div>
             </div>
           </div>
         )}
 
         {activeTab === 'schedule' && (
           <div className="space-y-4">
-            {/* Stats */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-              <div className="bg-white rounded-lg shadow p-4 border">
-                <div className="text-sm text-gray-500">Total Orders</div>
-                <div className="text-2xl font-bold text-gray-900">{schedule?.production_plans?.length || 0}</div>
+            {/* Stats + Push button */}
+            <div className="flex items-center justify-between mb-2">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 flex-1">
+                <div className="bg-white rounded-lg shadow p-4 border">
+                  <div className="text-sm text-gray-500">Total Orders</div>
+                  <div className="text-2xl font-bold text-gray-900">{schedule?.production_plans?.length || 0}</div>
+                </div>
+                <div className="bg-white rounded-lg shadow p-4 border">
+                  <div className="text-sm text-gray-500">Policy</div>
+                  <div className="text-2xl font-bold text-blue-600">EDF</div>
+                </div>
+                <div className="bg-white rounded-lg shadow p-4 border">
+                  <div className="text-sm text-gray-500">Conflicts Detected</div>
+                  <div className="text-2xl font-bold text-red-600">{schedule?.conflicts?.length || 0}</div>
+                </div>
+                <div className="bg-white rounded-lg shadow p-4 border">
+                  <div className="text-sm text-gray-500">Pushed to Arke</div>
+                  <div className="text-2xl font-bold text-green-600">
+                    {Object.values(pushStatus).filter(r => r.status === 'pushed').length}
+                    <span className="text-sm font-normal text-gray-400">
+                      {' / '}{schedule?.production_plans?.length || 0}
+                    </span>
+                  </div>
+                </div>
               </div>
-              <div className="bg-white rounded-lg shadow p-4 border">
-                <div className="text-sm text-gray-500">Policy</div>
-                <div className="text-2xl font-bold text-blue-600">EDF</div>
-              </div>
-              <div className="bg-white rounded-lg shadow p-4 border">
-                <div className="text-sm text-gray-500">Conflicts Detected</div>
-                <div className="text-2xl font-bold text-red-600">{schedule?.conflicts?.length || 0}</div>
-              </div>
+              <button
+                onClick={pushToArke}
+                disabled={pushing}
+                className={`ml-4 px-5 py-3 rounded-lg font-semibold text-sm shadow transition flex items-center gap-2 ${
+                  pushing
+                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                }`}
+              >
+                {pushing ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Pushing…
+                  </>
+                ) : (
+                  <>
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5-5m0 0l5 5m-5-5v12" />
+                    </svg>
+                    Push to Arke
+                  </>
+                )}
+              </button>
             </div>
 
             {/* Production Plans */}
             <div className="space-y-3">
-              {schedule?.production_plans?.map((plan, index) => (
+              {schedule?.production_plans?.map((plan, index) => {
+                const ps = pushStatus[plan.order_number]
+                return (
                 <div key={index} className="bg-white rounded-lg shadow-sm border hover:shadow-md transition">
                   <div className="p-4">
                     <div className="flex items-start justify-between">
@@ -481,6 +659,27 @@ function App() {
                           <span className={`px-3 py-1 rounded-full text-xs font-medium border ${getPriorityColor(plan.priority)}`}>
                             P{plan.priority} - {getPriorityLabel(plan.priority)}
                           </span>
+                          {/* Push status badge */}
+                          {ps?.status === 'pushed' && (
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700 border border-green-200">
+                              ✓ Pushed
+                            </span>
+                          )}
+                          {ps?.status === 'failed' && (
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 border border-red-200" title={ps.error_message}>
+                              ✗ Failed
+                            </span>
+                          )}
+                          {ps?.status === 'pushing' && (
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-700 border border-yellow-200 animate-pulse">
+                              ⏳ Pushing…
+                            </span>
+                          )}
+                          {!ps && (
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500 border border-gray-200">
+                              ○ Pending
+                            </span>
+                          )}
                         </div>
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                           <div>
@@ -513,7 +712,8 @@ function App() {
                     </div>
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )}
@@ -722,348 +922,11 @@ function App() {
         )}
 
         {activeTab === 'log' && (
-          <div className="space-y-4">
-            {/* Success Banner */}
-            <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-              <div className="flex items-center gap-2">
-                <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <span className="font-semibold text-green-900">Scheduling Completed Successfully</span>
-              </div>
-              <p className="text-sm text-green-700 mt-1 ml-7">
-                {schedule?.production_plans?.length || 0} orders scheduled using EDF (Earliest Deadline First) policy
-              </p>
-            </div>
-
-            {/* Event Log */}
-            <div className="bg-white rounded-lg shadow">
-              <div className="px-6 py-4 border-b border-gray-200">
-                <h2 className="text-lg font-semibold text-gray-900">Scheduling Events</h2>
-                <p className="text-sm text-gray-500 mt-1">Chronological log of scheduling decisions</p>
-              </div>
-              
-              <div className="divide-y divide-gray-100">
-                {schedule?.production_plans?.map((plan, index) => {
-                  // Check if this order is involved in a priority override
-                  const isOverride = schedule?.conflicts?.some(c => 
-                    c.priority_first.order === plan.order_number || 
-                    c.edf_first.order === plan.order_number
-                  )
-                  const overrideInfo = schedule?.conflicts?.find(c => 
-                    c.edf_first.order === plan.order_number
-                  )
-                  
-                  return (
-                    <div key={index} className={`px-6 py-4 ${
-                      isOverride ? 'bg-yellow-50' : 'hover:bg-gray-50'
-                    } transition`}>
-                      <div className="flex items-start gap-4">
-                        {/* Event Number */}
-                        <div className="flex-shrink-0">
-                          <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-blue-100 text-blue-700 font-semibold text-sm">
-                            {index + 1}
-                          </span>
-                        </div>
-                        
-                        {/* Event Details */}
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-2">
-                            <h3 className="font-semibold text-gray-900">{plan.order_number}</h3>
-                            <span className={`px-2 py-0.5 rounded text-xs font-medium ${getPriorityColor(plan.priority)}`}>
-                              P{plan.priority} - {getPriorityLabel(plan.priority)}
-                            </span>
-                          </div>
-                          
-                          <div className="text-sm text-gray-600 space-y-1">
-                            <div className="flex items-center gap-2">
-                              <span className="text-gray-500">Customer:</span>
-                              <span className="font-medium">{plan.customer}</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-gray-500">Product:</span>
-                              <span className="font-medium">{plan.quantity}x {plan.product}</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-gray-500">Scheduled:</span>
-                              <span className="font-medium">{formatDate(plan.starts_at)} → {formatDate(plan.ends_at)}</span>
-                            </div>
-                          </div>
-
-                          {/* EDF Reasoning */}
-                          <div className="mt-2 text-sm">
-                            <span className="text-gray-700">{plan.reasoning}</span>
-                          </div>
-
-                          {/* Priority Override Notice */}
-                          {overrideInfo && (
-                            <div className="mt-3 bg-yellow-100 border border-yellow-300 rounded-lg p-3">
-                              <div className="flex items-start gap-2">
-                                <svg className="h-5 w-5 text-yellow-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                </svg>
-                                <div className="text-sm">
-                                  <p className="font-semibold text-yellow-900">EDF Policy Override</p>
-                                  <p className="text-yellow-800 mt-1">{overrideInfo.resolution}</p>
-                                </div>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-
-              {/* Summary Footer */}
-              <div className="px-6 py-4 bg-gray-50 border-t border-gray-200">
-                <div className="grid grid-cols-3 gap-4 text-sm">
-                  <div>
-                    <span className="text-gray-500">Total Orders:</span>
-                    <span className="ml-2 font-semibold text-gray-900">{schedule?.production_plans?.length || 0}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Timespan:</span>
-                    <span className="ml-2 font-semibold text-gray-900">
-                      {schedule?.production_plans?.length > 0 && 
-                        formatDate(schedule.production_plans[0].starts_at) + ' - ' + 
-                        formatDate(schedule.production_plans[schedule.production_plans.length - 1].ends_at)
-                      }
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Policy:</span>
-                    <span className="ml-2 font-semibold text-blue-600">EDF</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'conflicts' && (
-          <div className="space-y-6">
-            {/* Deadline Miss Conflicts (Critical) */}
-            {schedule?.production_plans?.some(p => new Date(p.ends_at) > new Date(p.deadline)) && (
-              <div className="space-y-4">
-                {schedule.production_plans
-                  .filter(p => new Date(p.ends_at) > new Date(p.deadline))
-                  .map((plan, index) => {
-                    const endDate = new Date(plan.ends_at)
-                    const deadline = new Date(plan.deadline)
-                    const daysLate = Math.ceil((endDate - deadline) / (1000 * 60 * 60 * 24))
-                    
-                    return (
-                      <div key={index} className="bg-red-50 rounded-lg shadow-sm border-l-4 border-red-600 p-6">
-                        <div className="flex items-start">
-                          <div className="flex-shrink-0">
-                            <svg className="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                          </div>
-                          <div className="ml-3 flex-1">
-                            <h3 className="text-lg font-semibold text-red-900 mb-2">
-                              {plan.order_number} - Cannot Meet Deadline
-                            </h3>
-                            <div className="space-y-2">
-                              <div className="grid grid-cols-2 gap-4 text-sm">
-                                <div>
-                                  <span className="text-red-700 font-medium">Product:</span>
-                                  <p className="text-red-900">{plan.product}</p>
-                                </div>
-                                <div>
-                                  <span className="text-red-700 font-medium">Customer:</span>
-                                  <p className="text-red-900">{plan.customer}</p>
-                                </div>
-                                <div>
-                                  <span className="text-red-700 font-medium">Scheduled Completion:</span>
-                                  <p className="text-red-900">{formatDate(plan.ends_at)}</p>
-                                </div>
-                                <div>
-                                  <span className="text-red-700 font-medium">Deadline:</span>
-                                  <p className="text-red-900">{formatDate(plan.deadline)}</p>
-                                </div>
-                              </div>
-                              <div className="bg-red-100 p-3 rounded mt-3">
-                                <p className="text-sm text-red-900">
-                                  <span className="font-bold">⚠️ {daysLate} day{daysLate > 1 ? 's' : ''} late</span> - 
-                                  This order will miss its deadline due to production capacity constraints. 
-                                  Consider expediting, splitting batches, or communicating delay to customer.
-                                </p>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-              </div>
-            )}
-
-            {/* Priority vs Deadline Conflicts (Informational) */}
-            {schedule?.conflicts?.length > 0 && (
-              <div className="space-y-4">
-                <div className="flex items-center gap-2 mb-4">
-                  <svg className="h-6 w-6 text-yellow-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  <h2 className="text-xl font-bold text-yellow-900">EDF Policy Overruled Priority Level</h2>
-                </div>
-                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
-                  <p className="text-sm text-yellow-800">
-                    The following orders were scheduled based on <strong>deadline</strong> rather than <strong>priority level</strong>. 
-                    EDF policy prioritizes meeting deadlines over respecting priority order.
-                    <strong> All deadlines are still met.</strong>
-                  </p>
-                </div>
-                
-                {schedule.conflicts.map((conflict, index) => {
-                  // Find the full order details from production_plans
-                  const highPriorityOrder = schedule.production_plans.find(p => p.order_number === conflict.priority_first.order)
-                  const earlierDeadlineOrder = schedule.production_plans.find(p => p.order_number === conflict.edf_first.order)
-                  
-                  return (
-                    <div key={index} className="bg-white rounded-lg shadow-sm border-l-4 border-yellow-500 p-6">
-                      <div className="mb-4">
-                        <h3 className="text-lg font-semibold text-gray-900 mb-2 flex items-center gap-2">
-                          <span className="text-yellow-600">⚠️</span>
-                          Conflict #{index + 1}: Priority vs Deadline
-                        </h3>
-                        <p className="text-sm text-gray-600">
-                          EDF policy overruled priority level to meet earlier deadline
-                        </p>
-                      </div>
-
-                      <div className="grid md:grid-cols-2 gap-4 mb-4">
-                        {/* High Priority Order - Would Go First by Priority */}
-                        <div className="bg-red-50 border-2 border-red-200 rounded-lg p-4">
-                          <div className="flex items-center gap-2 mb-3">
-                            <span className="bg-red-600 text-white text-xs font-bold px-2 py-1 rounded">
-                              P{conflict.priority_first.priority} - MORE CRITICAL
-                            </span>
-                            <span className="text-xs text-red-700">But later deadline</span>
-                          </div>
-                          <div className="space-y-2">
-                            <div>
-                              <p className="text-sm font-bold text-red-900">{conflict.priority_first.order}</p>
-                              {highPriorityOrder && (
-                                <>
-                                  <p className="text-xs text-red-700">{highPriorityOrder.customer}</p>
-                                  <p className="text-xs text-red-700">{highPriorityOrder.quantity}x {highPriorityOrder.product}</p>
-                                </>
-                              )}
-                            </div>
-                            <div className="border-t border-red-200 pt-2 space-y-1">
-                              <div className="flex justify-between text-xs">
-                                <span className="text-red-700">Priority:</span>
-                                <span className="font-bold text-red-900">P{conflict.priority_first.priority} - {getPriorityLabel(conflict.priority_first.priority)}</span>
-                              </div>
-                              <div className="flex justify-between text-xs">
-                                <span className="text-red-700">Deadline:</span>
-                                <span className="font-bold text-red-900">{conflict.priority_first.deadline}</span>
-                              </div>
-                              {highPriorityOrder && (
-                                <>
-                                  <div className="flex justify-between text-xs">
-                                    <span className="text-red-700">Scheduled:</span>
-                                    <span className="font-medium text-red-800">{formatDate(highPriorityOrder.starts_at)}</span>
-                                  </div>
-                                  <div className="flex justify-between text-xs">
-                                    <span className="text-red-700">Completes:</span>
-                                    <span className="font-medium text-red-800">{formatDate(highPriorityOrder.ends_at)}</span>
-                                  </div>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                          <div className="mt-3 bg-red-100 rounded p-2">
-                            <p className="text-xs text-red-800">
-                              <strong>Position Impact:</strong> Moved back in queue to prioritize earlier deadline
-                            </p>
-                          </div>
-                        </div>
-
-                        {/* Earlier Deadline Order - Goes First by EDF */}
-                        <div className="bg-green-50 border-2 border-green-300 rounded-lg p-4">
-                          <div className="flex items-center gap-2 mb-3">
-                            <span className="bg-green-600 text-white text-xs font-bold px-2 py-1 rounded">
-                              P{conflict.edf_first.priority} - EARLIER DEADLINE
-                            </span>
-                            <span className="text-xs text-green-700">Lower priority but goes first</span>
-                          </div>
-                          <div className="space-y-2">
-                            <div>
-                              <p className="text-sm font-bold text-green-900">{conflict.edf_first.order}</p>
-                              {earlierDeadlineOrder && (
-                                <>
-                                  <p className="text-xs text-green-700">{earlierDeadlineOrder.customer}</p>
-                                  <p className="text-xs text-green-700">{earlierDeadlineOrder.quantity}x {earlierDeadlineOrder.product}</p>
-                                </>
-                              )}
-                            </div>
-                            <div className="border-t border-green-200 pt-2 space-y-1">
-                              <div className="flex justify-between text-xs">
-                                <span className="text-green-700">Priority:</span>
-                                <span className="font-bold text-green-900">P{conflict.edf_first.priority} - {getPriorityLabel(conflict.edf_first.priority)}</span>
-                              </div>
-                              <div className="flex justify-between text-xs">
-                                <span className="text-green-700">Deadline:</span>
-                                <span className="font-bold text-green-900">{conflict.edf_first.deadline}</span>
-                              </div>
-                              {earlierDeadlineOrder && (
-                                <>
-                                  <div className="flex justify-between text-xs">
-                                    <span className="text-green-700">Scheduled:</span>
-                                    <span className="font-medium text-green-800">{formatDate(earlierDeadlineOrder.starts_at)}</span>
-                                  </div>
-                                  <div className="flex justify-between text-xs">
-                                    <span className="text-green-700">Completes:</span>
-                                    <span className="font-medium text-green-800">{formatDate(earlierDeadlineOrder.ends_at)}</span>
-                                  </div>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                          <div className="mt-3 bg-green-100 rounded p-2">
-                            <p className="text-xs text-green-800">
-                              <strong>Position Impact:</strong> Moved ahead to meet earlier deadline ✓
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                        <p className="text-sm text-blue-900">
-                          <span className="font-semibold">EDF Decision:</span> {conflict.resolution}
-                        </p>
-                        <div className="mt-2 flex items-center gap-2 text-xs text-blue-700">
-                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                          </svg>
-                          <span>Both orders meet their deadlines with this scheduling</span>
-                        </div>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-
-            {/* No Conflicts */}
-            {!schedule?.production_plans?.some(p => new Date(p.ends_at) > new Date(p.deadline)) && 
-             schedule?.conflicts?.length === 0 && (
-              <div className="bg-green-50 rounded-lg p-8 text-center">
-                <svg className="mx-auto h-12 w-12 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <h3 className="mt-2 text-lg font-medium text-green-900">Perfect Schedule</h3>
-                <p className="mt-1 text-sm text-green-700">
-                  All production orders can be completed on schedule with no conflicts.
-                </p>
-              </div>
-            )}
-          </div>
+          <ScheduleLogTab
+            schedule={schedule}
+            productionLog={productionLog}
+            onRefresh={fetchProductionLog}
+          />
         )}
 
         {activeTab === 'live-view' && (
